@@ -26,18 +26,19 @@ namespace CoreCAD.App
             using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
             {
                 Entity ent = (Entity)tr.GetObject(per.ObjectId, OpenMode.ForRead);
-                var (guid, roleId, parentId, _) = XDataManager.GetCoreData(ent);
+                var data = XDataHelper.GetFullCache(ent);
 
-                if (string.IsNullOrEmpty(guid))
+                if (string.IsNullOrEmpty(data.guid))
                 {
                     ed.WriteMessage("\n>>> [NULL] Objek tidak memiliki identitas CoreCAD.");
                 }
                 else
                 {
                     ed.WriteMessage("\n========================================");
-                    ed.WriteMessage($"\nID      : {guid}");
-                    ed.WriteMessage($"\nROLE    : {roleId}");
-                    ed.WriteMessage($"\nPARENT  : {parentId}");
+                    ed.WriteMessage($"\nID      : {data.guid}");
+                    ed.WriteMessage($"\nROLE    : {data.role}");
+                    ed.WriteMessage($"\nMARK    : {data.mark}");
+                    ed.WriteMessage($"\nPARENT  : {data.parent}");
                     ed.WriteMessage("\n========================================");
                 }
                 tr.Commit();

@@ -8,18 +8,15 @@ namespace CoreCAD.Persistence
 {
     public static class ProjectContext
     {
-        private static string? _projectRoot;
-        private static string? _dataFolder;
-
-        public static string ProjectRoot => _projectRoot ??= DetectProjectRoot();
-        public static string DataFolder => _dataFolder ??= ResolveDataFolder();
+        public static string ProjectRoot => DetectProjectRoot();
+        public static string DataFolder => ResolveDataFolder();
 
         private static string DetectProjectRoot()
         {
             // Try to get the active document first, but prepare for Phantom Mode (Database only)
             string fullPath = "";
             var doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
-            
+
             if (doc != null)
             {
                 fullPath = doc.Name;
@@ -39,15 +36,15 @@ namespace CoreCAD.Persistence
             DirectoryInfo? dir = new DirectoryInfo(currentPath);
             while (dir != null)
             {
-                // Look for .dst (Sheet Set Manager) files
-                if (dir.GetFiles("*.dst").Length > 0)
+                // Look for .dst (Sheet Set Manager) ATAU CoreCAD_Master.json
+                if (dir.GetFiles("*.dst").Length > 0 || dir.GetFiles("CoreCAD_Master.json").Length > 0)
                 {
                     return dir.FullName;
                 }
                 dir = dir.Parent;
             }
 
-            // Fallback to the current drawing directory if no .dst is found
+            // Fallback to the current drawing directory if no root anchor is found
             return currentPath;
         }
 
@@ -57,7 +54,7 @@ namespace CoreCAD.Persistence
             if (string.IsNullOrEmpty(root)) return string.Empty;
 
             string dataPath = Path.Combine(root, "_CoreCAD_Data");
-            
+
             if (!Directory.Exists(dataPath))
             {
                 try
@@ -69,13 +66,18 @@ namespace CoreCAD.Persistence
                     // Handle potential permission issues silently for now
                 }
             }
-            
+
             return dataPath;
         }
 
         public static string GetMasterJsonPath()
         {
-            return Path.Combine(DataFolder, ProjectIdentities.ProjectMaster);
+            // Mencari CoreCAD_Master.json di root (atau folder induk)
+            string root = ProjectRoot;
+            if (string.IsNullOrEmpty(root)) return string.Empty;
+
+            // Identitas Resmi: CoreCAD_Master.json
+            return Path.Combine(root, "CoreCAD_Master.json");
         }
     }
 }

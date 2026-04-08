@@ -10,39 +10,36 @@ namespace CoreCAD.App
     {
         public void Initialize()
         {
-            // Register for document opening to ensure each new drawing gets the AppID
-            AcadApp.DocumentManager.DocumentCreated += (s, e) =>
-            {
-                RegisterCoreApp(e.Document);
-            };
+            // 1. Jalankan Penjaga Database (Event Watcher)
+            DatabaseWatcher.Initialize();
 
-            // Register for the current document (if any)
+            // 2. Registrasi AppID CoreCAD di setiap dokumen baru
+            AcadApp.DocumentManager.DocumentCreated += (s, e) => RegisterCoreApp(e.Document);
+
             if (AcadApp.DocumentManager.MdiActiveDocument != null)
-            {
                 RegisterCoreApp(AcadApp.DocumentManager.MdiActiveDocument);
-            }
         }
 
-        public void Terminate()
-        {
-            // Cleanup if necessary
-        }
+        public void Terminate() { }
 
         private void RegisterCoreApp(Document doc)
         {
             if (doc == null) return;
-
-            Autodesk.AutoCAD.DatabaseServices.Database db = doc.Database;
-
-            // Register Event Handler to monitor object cloning/copying
-            db.ObjectAppended -= XDataManager.OnObjectAppended;
-            db.ObjectAppended += XDataManager.OnObjectAppended;
+            Database db = doc.Database;
 
             using (doc.LockDocument())
             {
                 using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
-                    XDataManager.RegisterApp(tr, db);
+                    // Pastikan RegApp tersedia (Old logic backup)
+                    var rat = (RegAppTable)tr.GetObject(db.RegAppTableId, OpenMode.ForRead);
+                    if (!rat.Has(XDataHelper.RegAppName))
+                    {
+                        rat.UpgradeOpen();
+                        var ratr = new RegAppTableRecord { Name = XDataHelper.RegAppName };
+                        rat.Add(ratr);
+                        tr.AddNewlyCreatedDBObject(ratr, true);
+                    }
                     tr.Commit();
                 }
             }

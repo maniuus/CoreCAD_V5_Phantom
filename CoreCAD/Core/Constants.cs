@@ -6,8 +6,8 @@ namespace CoreCAD.Core
     /// </summary>
     public static class ProjectIdentities
     {
-        public const string RegAppName = "CoreCAD_v5";
-        public const string ProjectMaster = "project_master.json";
+        public const string RegAppName = "CoreCAD_V5";
+        public const string ProjectMaster = "CoreCAD_Master.json";
         public const string LibStandards = "library_standards.json";
     }
 
