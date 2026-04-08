@@ -1,0 +1,32 @@
+graph TD
+    %% Phase 1
+    subgraph "Phase 1: Identity"
+        ID[IdentityManager.cs] --> JSON[topology.json]
+    end
+
+    %% Phase 2
+    subgraph "Phase 2: Sync"
+        JSON --> EV[EventWatcher.cs]
+        EV --> GRD[SyncGuard.cs]
+    end
+
+    %% Phase 3
+    subgraph "Phase 3: Logic"
+        GRD --> VEC[VectorEngine.cs]
+        VEC --> SLO[SlopeCalc.cs]
+    end
+
+    %% Phase 4
+    subgraph "Phase 4: Automation"
+        SLO --> PHM[PhantomUpdater.cs]
+        PHM --> BULK[BulkCommand.cs]
+    end
+
+    %% Phase 5
+    subgraph "Phase 5: Documentation"
+        BULK --> TAG[SmartTag.cs]
+        TAG --> BQ[BQExporter.cs]
+    end
+
+    style ID fill:#f96,stroke:#333,stroke-width:2px
+    style PHM fill:#bbf,stroke:#333,stroke-width:4px

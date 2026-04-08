@@ -1,0 +1,25 @@
+# Build folders
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# IDE folders
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docattachments
+
+# AutoCAD temp files
+*.bak
+*.dwl
+*.dwl2
+*.log
+*.err
+
+# CoreCAD Data (Unless you want to include project master in repo)
+_CoreCAD_Data/
+backup/

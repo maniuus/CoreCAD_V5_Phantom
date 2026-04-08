@@ -1,0 +1,78 @@
+# TECHNICAL SPECIFICATION: CORE-CAD SOLO-MACH ENGINE V5.0
+
+## 1. SYSTEM OVERVIEW
+- Purpose: Single-drafter productivity multiplier for 200+ sheets.
+- Platform: AutoCAD 2026 / C# .NET 8.0.
+- Database Logic: "Invisible SSOT" (Single Source of Truth) using Local JSON.
+- Core Philosophy: Visual stays Z=0 in CAD, Data stays Z-Actual in JSON.
+
+## 2. PERSISTENCE LAYER (XDATA REGISTRY)
+Every entity managed by CoreCAD MUST carry this XData structure:
+- AppID: "CoreCAD_v5" (Registered App Name).
+- Field 1 (1000): GUID (UUID v4) -> Logical Identity.
+- Field 2 (1000): Role_ID -> Functional Identity (e.g., wall_exterior).
+- Field 3 (1000): Parent_ID -> Grouping Identity (e.g., for multi-view sync).
+- Field 4 (1040): Local_Z -> Real elevation for 2.5D calculation.
+
+## 3. DATABASE SCHEMA (PROJECT_MASTER.JSON)
+Standard Naming: snake_case for machine readability.
+{
+  "project_info": {
+    "project_name": string,
+    "base_elevation": double,
+    "last_sync_timestamp": datetime
+  },
+  "entities": [
+    {
+      "guid": string,
+      "type": "architecture" | "structure" | "mefp" | "landscape" | "interior",
+      "role_id": string,
+      "parameters": {
+        "width": double,
+        "height": double,
+        "slope_percentage": double,
+        "z_start": double,
+        "z_end": double
+      }
+    }
+  ]
+}
+
+## 4. NAMING CONVENTIONS
+- JSON Keys & Parameters: snake_case (e.g., foundation_width).
+- C# Classes & Methods: PascalCase (e.g., PhantomUpdater.Sync()).
+- C# Local Variables: camelCase (e.g., currentWallGuid).
+- AutoCAD Layers: DISC-TYPE-VIEW (e.g., AR-WALL-PLAN, ME-PIPE-SEC).
+
+## 5. GEOMETRY ENGINE & 2.5D LOGIC
+- CAD Visualization: Strictly enforced $Z = 0$ for all drafting operations.
+- Math Formula for MEP Slope:
+  $$\Delta Z = L \times \frac{s}{100}$$
+  (L = Horizontal Length, s = Slope Percentage).
+- Projection Logic:
+  - Plan View: X_cad = X_json, Y_cad = Y_json.
+  - Section View: X_cad = Horizontal_Dist, Y_cad = Z_json.
+
+## 6. THE PHANTOM MODULE (BATCH PROCESSOR)
+- Engine: Headless processing via `Database.ReadDwgFile`.
+- Mechanism:
+  1. Detect modified GUIDs in Master JSON.
+  2. Open target sheets (.dwg) in system memory (Side-loading).
+  3. Find Entities by GUID + Role_ID.
+  4. Apply Geometric Transformation (Stretch/Move/Scale/Attribute Update).
+  5. Silent Save & Database Dispose.
+
+## 7. UI/UX CONFIGURATION (RIBBON COCKPIT)
+Hierarchy: Discipline -> View Context -> Tool.
+- Disciplines: Landscape, Architecture, Structure, MEFP, Interior.
+- View Contexts (Tabs/Groups):
+  - [FP]: Floorplan Input & Metadata.
+  - [EL/SEC]: Projection & Z-Alignment.
+  - [DET]: Smart Blow-ups & Callouts.
+- Management Tools: [PUSH SYNC], [Audit GUID], [Export BQ].
+
+## 8. SUCCESS METRICS (KPI)
+- Integrity: 0% duplicate GUID on Copy/Paste (ObjectCloned Handler).
+- Precision: Positional drift < 0.001mm between JSON and Visual.
+- Scalability: Batch update 200 sheets < 10 minutes total processing time.
+- Stability: Zero Fatal Errors during Background Memory Management.
