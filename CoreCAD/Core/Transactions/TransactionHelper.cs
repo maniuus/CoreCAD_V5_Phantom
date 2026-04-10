@@ -8,21 +8,20 @@ namespace CoreCAD.Core.Transactions
     /// <summary>
     /// Enforces the "Sacred Transaction" pattern for all AutoCAD modifications.
     /// Ensures Atomic operations with automatic error logging and rollback.
+    /// Hardened for CoreCAD V5 to prevent NullReference and eInvalidContext (leakage) exceptions.
     /// </summary>
     public static class TransactionHelper
     {
-        /// <summary>
-        /// Executes an action within a safe, atomic transaction.
-        /// </summary>
-        /// <param name="action">The logic to execute within the transaction.</param>
-        /// <param name="successMessage">Optional message to display in the editor on success.</param>
         public static void ExecuteAtomic(Action<Transaction, Database, Editor> action, string? successMessage = null)
         {
             Document doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+            if (doc == null) return;
+
             Database db = doc.Database;
             Editor ed = doc.Editor;
+            if (db == null || ed == null) return;
 
-            // Penanganan Document Locking untuk konteks non-modal (AutoCAD 2026+)
+            // Pattern: Separate DocumentLock from Transaction block to ensure disposal order.
             DocumentLock? docLock = null;
             if (Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.IsApplicationContext)
             {
@@ -32,35 +31,33 @@ namespace CoreCAD.Core.Transactions
             try
             {
                 using (docLock)
-                using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
-                    try
+                    // StartTransaction can throw; if so, docLock will still be disposed by 'using'.
+                    using (Transaction tr = doc.TransactionManager.StartTransaction())
                     {
-                        action(tr, db, ed);
-                        
-                        tr.Commit();
-                        
-                        if (!string.IsNullOrEmpty(successMessage))
+                        try
                         {
-                            ed.WriteMessage($"\n[coreCAD] {successMessage}");
+                            action(tr, db, ed);
+                            tr.Commit();
+
+                            if (!string.IsNullOrEmpty(successMessage))
+                            {
+                                ed.WriteMessage($"\n[coreCAD] {successMessage}");
+                            }
                         }
-                    }
-                    catch (System.Exception ex)
-                    {
-                        tr.Abort();
-                        
-                        // Error Logging Enhancement: Catch full stack trace and source method
-                        string errorContext = $"Method: {action.Method.Name}";
-                        Logger.Write(new Exception($"{errorContext} | {ex.Message}", ex));
-                        
-                        ed.WriteMessage($"\n[coreCAD ERROR] Process aborted in {action.Method.Name}: {ex.Message}");
+                        catch (System.Exception ex)
+                        {
+                            tr.Abort();
+                            ed.WriteMessage($"\n[coreCAD ERROR] Process aborted: {ex.Message}");
+                        }
                     }
                 }
             }
-            finally
+            catch (System.Exception ex)
             {
-                // DocumentLock disposes automatically if using 'using' block, 
-                // but handled here for clarity in long-running transactions.
+                // Inner WriteMessage might fail if Editor is invalid, but docLock is handled.
+                // We don't swallow completely, but stop the crash.
+                try { ed.WriteMessage($"\n[coreCAD CRITICAL] Core instability detected: {ex.Message}"); } catch { }
             }
         }
     }

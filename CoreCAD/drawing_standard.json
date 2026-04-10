@@ -1,0 +1,39 @@
+{
+  "Layers": {
+    "Wall": {
+      "Name": "A-WALL",
+      "Color": 111,
+      "Linetype": "Continuous"
+    },
+    "Door": {
+      "Name": "A-DOOR",
+      "Color": 111,
+      "Linetype": "Continuous"
+    },
+    "Column": {
+      "Name": "S-COLM",
+      "Color": 151,
+      "Linetype": "Continuous"
+    },
+    "Annotation": {
+      "Name": "C-ANNO",
+      "Color": 144,
+      "Linetype": "Continuous"
+    },
+    "Centerline": {
+      "Name": "C-CENT",
+      "Color": 144,
+      "Linetype": "CENTER"
+    },
+    "WallHatch": {
+      "Name": "A-WALL-HATCH",
+      "Color": 252,
+      "Linetype": "Continuous"
+    },
+    "Backbone": {
+      "Name": "CC_BACKBONE",
+      "Color": 250,
+      "Linetype": "Continuous"
+    }
+  }
+}
