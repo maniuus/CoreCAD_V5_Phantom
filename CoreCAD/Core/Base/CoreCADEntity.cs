@@ -42,7 +42,9 @@ namespace CoreCAD.Core.Base
         public abstract void SyncFromJSON();
 
         /// <summary>
-        /// Injects entity metadata into AutoCAD XData.
+        /// Injects entity metadata into AutoCAD XData. 
+        /// Consistent with officially registered "CORECAD_ENGINE" schema 
+        /// (GUID, Material, Level, PseudoZ [1040]).
         /// </summary>
         /// <param name="ent">Target AutoCAD Entity.</param>
         /// <param name="tr">Active transaction.</param>
@@ -50,6 +52,7 @@ namespace CoreCAD.Core.Base
 
         /// <summary>
         /// Extracts entity metadata from AutoCAD XData.
+        /// Must handle the 4th pocket (DxfCode 1040) for PseudoZ.
         /// </summary>
         /// <param name="ent">Source AutoCAD Entity.</param>
         public abstract void LoadFromXData(Entity ent);

@@ -28,14 +28,25 @@ namespace CoreCAD.Core.Registry
 
         /// <summary>
         /// Injects standard identity XData into an entity.
+        /// Standard Format: [1001] AppName, [1000] GUID (D format), [1000] MaterialID, [1000] LevelID, [1040] PseudoZ.
         /// </summary>
-        public static void SetIdentity(Entity ent, string guid, string materialId, string levelId)
+        public static void SetIdentity(Entity ent, Guid guid, string materialId, string levelId, double pseudoZ)
         {
+            // Proteksi: Pastikan entitas OpenForWrite
+            if (!ent.IsWriteEnabled)
+            {
+                ent.UpgradeOpen();
+            }
+
+            // Standarisasi GUID format "D" Uppercase
+            string guidString = guid.ToString("D").ToUpper();
+
             using (ResultBuffer rb = new ResultBuffer(
                 new TypedValue((int)DxfCode.ExtendedDataRegAppName, RegAppName),
-                new TypedValue((int)DxfCode.ExtendedDataAsciiString, guid),
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, guidString),
                 new TypedValue((int)DxfCode.ExtendedDataAsciiString, materialId),
-                new TypedValue((int)DxfCode.ExtendedDataAsciiString, levelId)
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, levelId),
+                new TypedValue((int)DxfCode.ExtendedDataReal, pseudoZ)
             ))
             {
                 ent.XData = rb;

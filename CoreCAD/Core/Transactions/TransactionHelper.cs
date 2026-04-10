@@ -18,29 +18,49 @@ namespace CoreCAD.Core.Transactions
         /// <param name="successMessage">Optional message to display in the editor on success.</param>
         public static void ExecuteAtomic(Action<Transaction, Database, Editor> action, string? successMessage = null)
         {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
+            Document doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             Database db = doc.Database;
             Editor ed = doc.Editor;
 
-            using (Transaction tr = db.TransactionManager.StartTransaction())
+            // Penanganan Document Locking untuk konteks non-modal (AutoCAD 2026+)
+            DocumentLock? docLock = null;
+            if (Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.IsApplicationContext)
             {
-                try
+                docLock = doc.LockDocument();
+            }
+
+            try
+            {
+                using (docLock)
+                using (Transaction tr = db.TransactionManager.StartTransaction())
                 {
-                    action(tr, db, ed);
-                    
-                    tr.Commit();
-                    
-                    if (!string.IsNullOrEmpty(successMessage))
+                    try
                     {
-                        ed.WriteMessage($"\n[coreCAD] {successMessage}");
+                        action(tr, db, ed);
+                        
+                        tr.Commit();
+                        
+                        if (!string.IsNullOrEmpty(successMessage))
+                        {
+                            ed.WriteMessage($"\n[coreCAD] {successMessage}");
+                        }
+                    }
+                    catch (System.Exception ex)
+                    {
+                        tr.Abort();
+                        
+                        // Error Logging Enhancement: Catch full stack trace and source method
+                        string errorContext = $"Method: {action.Method.Name}";
+                        Logger.Write(new Exception($"{errorContext} | {ex.Message}", ex));
+                        
+                        ed.WriteMessage($"\n[coreCAD ERROR] Process aborted in {action.Method.Name}: {ex.Message}");
                     }
                 }
-                catch (System.Exception ex)
-                {
-                    tr.Abort();
-                    Logger.Write(ex);
-                    ed.WriteMessage($"\n[coreCAD ERROR] Process aborted: {ex.Message}");
-                }
+            }
+            finally
+            {
+                // DocumentLock disposes automatically if using 'using' block, 
+                // but handled here for clarity in long-running transactions.
             }
         }
     }
