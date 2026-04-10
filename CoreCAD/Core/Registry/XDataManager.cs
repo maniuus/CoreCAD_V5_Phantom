@@ -305,6 +305,8 @@ namespace CoreCAD.Core.Registry
 
                 foreach (ObjectId entId in btr)
                 {
+                    if (entId.IsErased) continue;
+                    
                     Entity ent = (Entity)tr.GetObject(entId, OpenMode.ForRead);
                     var identity = GetIdentity(ent);
                     if (identity != null && identity.Value.guid == guid)

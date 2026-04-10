@@ -4,6 +4,7 @@ using Autodesk.AutoCAD.Geometry;
 using CoreCAD.Core.Geometry;
 using CoreCAD.Core.Registry;
 using CoreCAD.Modules.Architecture;
+using Autodesk.AutoCAD.EditorInput;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -39,18 +40,10 @@ namespace CoreCAD.Core.Services
         {
             doc.CommandWillStart += (s, e) => _isCommandActive = true;
             doc.CommandEnded += (s, e) => { _isCommandActive = false; TriggerIdleUpdate(); };
-            doc.CommandCancelled += (s, e) => { _isCommandActive = false; _pendingUpdates = new ConcurrentQueue<ObjectId>(); _uniqueUpdates.Clear(); };
+            doc.CommandCancelled += (s, e) => { _isCommandActive = false; TriggerIdleUpdate(); };
         }
 
-        private void Database_ObjectAppended(object sender, ObjectEventArgs e)
-        {
-            // COPY/CLONE DETECTION: Defer to Idle to avoid eInvalidContext/Transaction leaks
-            if (e.DBObject is Entity ent && XDataManager.HasIdentity(ent))
-            {
-                _pendingReIDs.Enqueue(ent.ObjectId);
-                TriggerIdleUpdate();
-            }
-        }
+        private void Database_ObjectAppended(object sender, ObjectEventArgs e) { }
 
         private void Database_ObjectModified(object sender, ObjectEventArgs e)
         {
@@ -83,7 +76,7 @@ namespace CoreCAD.Core.Services
                 _uniqueUpdates.Add(id);
                 _pendingUpdates.Enqueue(id);
             }
-            if (!_isCommandActive) TriggerIdleUpdate();
+            TriggerIdleUpdate();
         }
 
         private void TriggerIdleUpdate()
@@ -99,98 +92,80 @@ namespace CoreCAD.Core.Services
         {
             Autodesk.AutoCAD.ApplicationServices.Application.Idle -= OnIdle;
             _isIdleSubscribed = false;
+            
             if (_isCommandActive) return;
 
-            ProcessPendingReIDs();
             ProcessPendingUpdates();
-        }
-
-        private void ProcessPendingReIDs()
-        {
-            if (_pendingReIDs.IsEmpty) return;
-
-            var databaseGroups = new Dictionary<Database, List<ObjectId>>();
-            while (_pendingReIDs.TryDequeue(out ObjectId id))
-            {
-                if (id.IsValid && !id.IsErased)
-                {
-                    Database db = id.Database;
-                    if (!databaseGroups.ContainsKey(db)) databaseGroups[db] = new List<ObjectId>();
-                    databaseGroups[db].Add(id);
-                }
-            }
-
-            foreach (var kvp in databaseGroups)
-            {
-                Database db = kvp.Key;
-                try
-                {
-                    using (var tr = db.TransactionManager.StartTransaction())
-                    {
-                        foreach (ObjectId id in kvp.Value)
-                        {
-                            Entity ent = (Entity)tr.GetObject(id, OpenMode.ForWrite);
-                            var identity = XDataManager.GetIdentity(ent);
-                            if (identity != null)
-                            {
-                                Guid newGuid = Guid.NewGuid();
-                                XDataManager.SetIdentity(ent, newGuid, identity.Value.materialId, identity.Value.levelId, identity.Value.pseudoZ, identity.Value.role);
-                            }
-                        }
-                        tr.Commit();
-                    }
-                }
-                catch { }
-            }
         }
 
         private void ProcessPendingUpdates()
         {
             if (_pendingUpdates.IsEmpty) return;
 
-            var databaseGroups = new Dictionary<Database, List<ObjectId>>();
+            // Group by Document instead of just Database to manage Locking correctly
+            var docGroups = new Dictionary<Document, List<ObjectId>>();
             while (_pendingUpdates.TryDequeue(out ObjectId id))
             {
                 _uniqueUpdates.Remove(id);
                 if (id.IsValid && !id.IsErased)
                 {
-                    Database db = id.Database;
-                    if (!databaseGroups.ContainsKey(db)) databaseGroups[db] = new List<ObjectId>();
-                    databaseGroups[db].Add(id);
+                    Document doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.GetDocument(id.Database);
+                    if (doc == null) continue;
+
+                    if (!docGroups.ContainsKey(doc)) docGroups[doc] = new List<ObjectId>();
+                    docGroups[doc].Add(id);
                 }
             }
 
-            foreach (var kvp in databaseGroups)
+            foreach (var kvp in docGroups)
             {
-                Database db = kvp.Key;
+                Document doc = kvp.Key;
+                Editor ed = doc.Editor;
+                Database db = doc.Database;
+                
                 try
                 {
-                    using (var tr = db.TransactionManager.StartTransaction())
+                    // CRITICAL FIX: Lock the document before modifying from the Idle event
+                    using (doc.LockDocument())
+                    using (var tr = doc.TransactionManager.StartTransaction())
                     {
                         foreach (ObjectId id in kvp.Value)
                         {
                             if (id.IsErased) continue;
                             Line line = (Line)tr.GetObject(id, OpenMode.ForRead);
-                            UpdateWallGeometry(line, tr);
+                            UpdateWallGeometry(line, tr, ed);
                         }
                         tr.Commit();
                     }
+                    ed.Regen(); // Force hatch and geometry redraw
                 }
-                catch { }
+                catch (System.Exception ex)
+                {
+                    try { ed.WriteMessage($"\n[coreCAD ERROR] Sync failed: {ex.Message}"); } catch { }
+                }
             }
         }
 
-        private void UpdateWallGeometry(Line line, Transaction tr)
+        private void UpdateWallGeometry(Line line, Transaction tr, Editor ed)
         {
             if (line == null) return;
             var identity = XDataManager.GetIdentity(line);
             if (identity == null) return;
 
-            ObjectIdCollection childrenIds = XDataManager.FindEntitiesByGuid(line.Database, identity.Value.guid, tr);
+            ObjectIdCollection childrenIds = XDataManager.GetChildren(line, tr);
+            if (childrenIds.Count == 0)
+            {
+                childrenIds = XDataManager.FindEntitiesByGuid(line.Database, identity.Value.guid, tr);
+            }
+
+            if (childrenIds.Count == 0) return;
+
             List<Entity> children = new List<Entity>();
             foreach (ObjectId id in childrenIds)
             {
                 if (id == line.ObjectId) continue;
+                if (!id.IsValid || id.IsErased) continue;
+                
                 children.Add((Entity)tr.GetObject(id, OpenMode.ForWrite));
             }
             
@@ -209,12 +184,12 @@ namespace CoreCAD.Core.Services
                         ent.SetPointAt(i, new Point2d(pts[i].X, pts[i].Y));
                     }
                     ent.Elevation = pts[0].Z;
-                    ent.RecordGraphicsModified(true);
+                    ent.RecordGraphicsModified(true); // Force DB to see changes
                 }
 
                 foreach (var ent in children.OfType<Hatch>())
                 {
-                    ent.EvaluateHatch(true);
+                    ent.EvaluateHatch(true); // Re-calculate based on updated boundary
                 }
             }
         }
@@ -222,20 +197,29 @@ namespace CoreCAD.Core.Services
         private void CleanupChildren(Line line)
         {
             if (line == null || line.Database == null) return;
+            Document doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.GetDocument(line.Database);
+            if (doc == null) return;
+
             try
             {
-                using (var tr = line.Database.TransactionManager.StartTransaction())
+                using (doc.LockDocument())
+                using (var tr = doc.TransactionManager.StartTransaction())
                 {
                     var identity = XDataManager.GetIdentity(line);
                     if (identity != null)
                     {
-                        ObjectIdCollection children = XDataManager.FindEntitiesByGuid(line.Database, identity.Value.guid, tr);
+                        ObjectIdCollection children = XDataManager.GetChildren(line, tr);
+                        if (children.Count == 0)
+                        {
+                            children = XDataManager.FindEntitiesByGuid(line.Database, identity.Value.guid, tr);
+                        }
+
                         foreach (ObjectId id in children)
                         {
-                            if (id != line.ObjectId)
+                            if (id != line.ObjectId && id.IsValid && !id.IsErased)
                             {
                                 Entity ent = (Entity)tr.GetObject(id, OpenMode.ForWrite);
-                                if (!ent.IsErased) ent.Erase();
+                                ent.Erase();
                             }
                         }
                     }
