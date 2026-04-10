@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage 
+    SchemaVersion="1.0" 
+    AppVersion="5.0.0" 
+    Author="CoreCAD_Team" 
+    ProductCode="{57DD-C469-72BD-4355-9DDE-BD1E22A3EE48}" 
+    Name="CoreCAD V5.0" 
+    Description="Generative BIM Engine for AutoCAD" 
+    Icon="./Contents/Resources/CoreCAD_Icon.ico">
+    
+    <CompanyDetails Name="Advanced Agentic Coding" Phone="+62-CORE-CAD" Url="https://corecad.dev" Email="support@corecad.dev" />
+    
+    <Components>
+        <ComponentEntry 
+            AppName="CoreCAD V5.0" 
+            ModuleName="./Contents/CoreCAD.dll" 
+            AppDescription="Main Logic & UI Engine" 
+            LoadOnAutoCADStartup="True">
+            <RuntimeRequirements SeriesMin="R24.0" SeriesMax="R26.0" />
+        </ComponentEntry>
+    </Components>
+</ApplicationPackage>

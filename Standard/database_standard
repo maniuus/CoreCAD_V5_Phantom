@@ -1,0 +1,47 @@
+================================================================================
+            DATABASE & SCHEMA STANDARD: coreCAD SYSTEM
+================================================================================
+Versi          : 2026.04
+Format File    : JSON (.json)
+Unit Default   : mm, kg, m3, IDR
+--------------------------------------------------------------------------------
+
+1. UNIVERSAL MANDATORY KEYS (WAJIB ADA)
+---------------------------------------
+Setiap entitas data di dalam JSON wajib memiliki:
+- "id"        : String unik sebagai primary key (Contoh: "CONC_K300").
+- "version"   : String versi data untuk kompatibilitas update.
+- "timestamp" : Tanggal update terakhir data tersebut.
+
+2. DATA TYPES STANDARD
+----------------------
+- Linear Dim : Double (dalam milimeter).
+- Force/Load : Double (dalam Newton atau kN).
+- Weight     : Double (dalam kilogram).
+- BoQ Price  : Decimal/Double (dalam IDR).
+- Boolean    : Digunakan untuk toggle (Contoh: "isLoadBearing": true).
+
+3. RELATIONSHIP MAPPING (FOREIGN KEYS)
+--------------------------------------
+- Objek di AutoCAD (Instance) memanggil "material_id" yang ada di JSON.
+- Perubahan pada Properti Fisik di JSON akan mempengaruhi hasil kalkulasi 
+  Volume dan Berat pada semua objek terkait secara otomatis (Dynamic Link).
+
+4. FOLDER STRUCTURE PROTOCOL
+----------------------------
+- /Library/Global/     : Berisi standar SNI/ISO yang tidak boleh diubah user.
+- /Library/User/       : Berisi standar custom perusahaan.
+- /Library/Projects/   : Berisi JSON khusus yang hanya berlaku di project aktif.
+
+5. DATA INTEGRITY RULES
+-----------------------
+- Case Sensitivity: Semua ID material wajib UPPERCASE untuk menghindari 
+  kesalahan pencarian (Lookup Error).
+- No Duplicates: Script 'CC_VALIDATE_DB' wajib dijalankan sebelum merilis 
+  update library untuk memastikan tidak ada ID yang ganda.
+- Default Value: Setiap field wajib memiliki nilai default jika data kosong 
+  untuk mencegah 'NullReferenceException' pada C#.
+
+--------------------------------------------------------------------------------
+"Clean Data is the Foundation of Robust Intelligence."
+================================================================================
