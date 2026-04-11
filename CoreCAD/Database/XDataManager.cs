@@ -1,6 +1,6 @@
 using System;
 
-namespace CoreCAD.Database
+namespace CoreCAD.Persistence
 {
     /// <summary>
     /// [V5 DATABASE LAYER] Manages all persistence to/from AutoCAD XData and ExtensionDictionary.
