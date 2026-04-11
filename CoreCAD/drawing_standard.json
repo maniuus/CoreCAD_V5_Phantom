@@ -34,6 +34,11 @@
       "Name": "CC_BACKBONE",
       "Color": 250,
       "Linetype": "Continuous"
+    },
+    "Grip": {
+      "Name": "CC_GRIP",
+      "Color": 2,
+      "Linetype": "Continuous"
     }
   }
 }

@@ -4,6 +4,7 @@ using Autodesk.AutoCAD.Runtime;
 using CoreCAD.Core.Geometry;
 using CoreCAD.Core.Services;
 using CoreCAD.Commands;
+using CoreCAD.Overrules;
 using System;
 
 // CRITICAL: Explicit assembly-level hints for AutoCAD command scanner
@@ -36,6 +37,10 @@ namespace CoreCAD.Core
                 
                 // Global Settings
                 Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("PROXYGRAPHICS", 1);
+
+                // 3. Register OVERRULES
+                Overrule.AddOverrule(RXClass.GetClass(typeof(Entity)), WallViewGripOverrule.Instance, true);
+                Overrule.Overruling = true;
             }
             catch { }
         }
@@ -71,6 +76,9 @@ namespace CoreCAD.Core
                         WallSyncReactor.Instance.Unregister(doc.Database);
                     }
                 }
+
+                // Unregister OVERRULES
+                Overrule.RemoveOverrule(RXClass.GetClass(typeof(Entity)), WallViewGripOverrule.Instance);
             }
             catch { }
         }

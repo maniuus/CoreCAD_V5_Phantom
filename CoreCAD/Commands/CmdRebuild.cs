@@ -15,27 +15,51 @@ namespace CoreCAD.Commands
         public void RebuildAll()
         {
             var doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
-            var db  = doc.Database;
+            var db = doc.Database;
             Editor ed = doc.Editor;
 
-            using (Transaction tr = doc.TransactionManager.StartTransaction())
+            // [V2] Tangguhkan Reactor selama proses Rebuild Global
+            Core.Services.WallSyncReactor.IsSuspended = true;
+
+            try
             {
-                try
+                // [V2 ISOLASI] Transaksi 1: PURGE ONLY
+                using (Transaction tr = doc.TransactionManager.StartTransaction())
                 {
-                    ed.WriteMessage("\n[CoreCAD] Purging view lama...");
-                    ViewGenerator.PurgeOldViews(db, tr);
-
-                    ed.WriteMessage("\n[CoreCAD] Baking view baru...");
-                    ViewGenerator.BakeAllWalls(db, tr);
-
-                    tr.Commit();
-                    ed.WriteMessage("\n[CoreCAD] ✓ Rebuild Selesai! Semua dinding tercetak sempurna.");
+                    try
+                    {
+                        ed.WriteMessage("\n[CoreCAD] Purging view lama...");
+                        ViewGenerator.PurgeOldViews(db, tr);
+                        tr.Commit();
+                    }
+                    catch (System.Exception ex)
+                    {
+                        ed.WriteMessage($"\n[Error Purge]: {ex.Message}");
+                        tr.Abort();
+                        return;
+                    }
                 }
-                catch (System.Exception ex)
+
+                // [V2 ISOLASI] Transaksi 2: BAKE ONLY
+                using (Transaction tr = doc.TransactionManager.StartTransaction())
                 {
-                    ed.WriteMessage($"\n[Error CC_REBUILD]: {ex.Message}");
-                    tr.Abort();
+                    try
+                    {
+                        ed.WriteMessage("\n[CoreCAD] Baking view baru...");
+                        ViewGenerator.BakeAllWalls(db, tr);
+                        tr.Commit();
+                        ed.WriteMessage("\n[CoreCAD] ✓ Rebuild Selesai! Semua dinding tercetak sempurna.");
+                    }
+                    catch (System.Exception ex)
+                    {
+                        ed.WriteMessage($"\n[Error Bake]: {ex.Message}");
+                        tr.Abort();
+                    }
                 }
+            }
+            finally
+            {
+                Core.Services.WallSyncReactor.IsSuspended = false;
             }
         }
     }

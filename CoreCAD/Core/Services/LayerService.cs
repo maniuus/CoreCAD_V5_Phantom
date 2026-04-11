@@ -32,6 +32,9 @@ namespace CoreCAD.Core.Services
         public static string BackboneLayer => JsonService.GetLayerConfig("Backbone").Name;
         public static short ColorBackbone => JsonService.GetLayerConfig("Backbone").Color;
 
+        public static string GripLayer => JsonService.GetLayerConfig("Grip").Name;
+        public static short ColorGrip => JsonService.GetLayerConfig("Grip").Color;
+
         /// <summary>
         /// Ensures a specific layer exists in the database with the requested properties.
         /// </summary>

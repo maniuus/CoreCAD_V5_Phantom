@@ -4,7 +4,9 @@ using Autodesk.AutoCAD.Runtime;
 using CoreCAD.Persistence;
 using CoreCAD.Models;
 using CoreCAD.Utils;
+using CoreCAD.Core;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace CoreCAD.Engine
 {
@@ -12,6 +14,15 @@ namespace CoreCAD.Engine
     // INTERNAL DATA MODEL — hanya dipakai di Engine, tidak di-expose keluar.
     // Menyimpan data mentah + vertex hasil kalkulasi untuk satu dinding.
     // ═══════════════════════════════════════════════════════════════════════════
+    /// <summary>Data untuk penempatan simbol opening (pintu/jendela).</summary>
+    internal class OpeningInstance
+    {
+        public string BlockName = "";
+        public Point2d Location;
+        public Vector2d Direction;
+        public double Thickness;
+    }
+
     internal class WallModel
     {
         public ObjectId LineId;
@@ -24,6 +35,10 @@ namespace CoreCAD.Engine
         public Point2d V1;  // End-Left
         public Point2d V2;  // End-Right
         public Point2d V3;  // Start-Right
+
+        // Flags untuk menyembunyikan "Cap" (Garis penutup ujung) jika tersambung
+        public bool HasStartJoin = false;
+        public bool HasEndJoin   = false;
 
         /// <summary>Arah dinding (Start → End), sudah dinormalisasi.</summary>
         public Vector2d Direction =>
@@ -49,7 +64,8 @@ namespace CoreCAD.Engine
 
             // Pass 1 — collect
             List<ObjectId> toErase = new List<ObjectId>();
-            foreach (ObjectId id in btr)
+            ObjectId[] ids = btr.Cast<ObjectId>().ToArray();
+            foreach (ObjectId id in ids)
             {
                 if (id.IsErased) continue;
                 Entity? ent = tr.GetObject(id, OpenMode.ForRead) as Entity;
@@ -82,87 +98,258 @@ namespace CoreCAD.Engine
             BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
             BlockTableRecord btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
-            // ── STEP A: Kumpulkan semua WallModel ────────────────────────────
-            List<WallModel> walls = BuildWallModels(btr, tr);
-            if (walls.Count == 0) return;
+            // [STANDARD] Pastikan Layer Standard ada sebelum proses drafting
+            StandardManager.Instance.Load(); // Refresh config
+            StandardManager.Instance.EnsureLayer(db, tr, "Wall");
+            StandardManager.Instance.EnsureLayer(db, tr, "WallHatch");
+            StandardManager.Instance.EnsureLayer(db, tr, "Door");
+            StandardManager.Instance.EnsureLayer(db, tr, "Grip");
+
+            // ── STEP A: Kumpulkan semua WallModel (Sliced) & OpeningInstance ────────────────────────────
+            var ed = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor;
+            ed.WriteMessage("\n[Step A] Building geometry models...");
+            List<OpeningInstance> openings = new List<OpeningInstance>();
+            List<WallModel> walls = BuildWallModels(btr, tr, openings);
+            if (walls.Count == 0 && openings.Count == 0) return;
 
             // ── STEP B & C: Look-Ahead — deteksi junction, hitung miter ──────
+            ed.WriteMessage("\n[Step B/C] Resolving junctions...");
             ResolveMiters(walls);
 
-            // ── STEP D & E: Cetak Polyline + Hatch ───────────────────────────
+            // ── STEP D & E: Cetak raga dinding (Invisible) + Hatch + Outline Visual ──────
+            ed.WriteMessage("\n[Step D/E/F] Generating visual skins and hatches...");
             foreach (WallModel model in walls)
             {
-                // D — Polyline dari vertex hasil kalkulasi
+                // D — Polyline pembatas (untuk Hatch), dibuat Invisible
                 Polyline? wallPoly = BuildPolylineFromModel(model);
-                if (wallPoly == null)
-                {
-                    // Log error ke AutoCAD console
-                    Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor.WriteMessage(
-                        $"\n[CoreCAD Warning] Dinding {model.LineId} dilewati karena geometri melilit (Self-Intersecting).");
-                    continue;
-                }
+                if (wallPoly == null) continue;
 
+                wallPoly.Visible = false; // [ANTI-DIAGONAL] Sembunyikan garis kotak
                 btr.AppendEntity(wallPoly);
                 tr.AddNewlyCreatedDBObject(wallPoly, true);
                 TagAsView(wallPoly);
 
                 // E — Hatch ANSI31
-                Hatch wallHatch = new Hatch();
-                wallHatch.SetDatabaseDefaults();
-                wallHatch.SetHatchPattern(HatchPatternType.PreDefined, "ANSI31");
-                wallHatch.PatternScale = 15.0;
+                Hatch wallHatch = BuildHatch(wallPoly);
                 btr.AppendEntity(wallHatch);
                 tr.AddNewlyCreatedDBObject(wallHatch, true);
-                wallHatch.AppendLoop(HatchLoopTypes.Default, new ObjectIdCollection { wallPoly.ObjectId });
-                wallHatch.EvaluateHatch(true);
                 TagAsView(wallHatch);
+
+                // F — [ANTI-DIAGONAL] Gambar garis tepi visual (Skins & Caps)
+                GenerateVisualOutline(model, tr, btr);
             }
+
+            // ── STEP G: Insert Opening Symbols (Blocks) ──────────────────────
+            ed.WriteMessage("\n[Step G] Inserting symbols...");
+            foreach (var op in openings)
+            {
+                InsertOpeningBlock(op, tr, btr);
+            }
+
+            // ── STEP H: [V2] Generate Interactive Grips (Proxy Lines) ────────
+            ed.WriteMessage("\n[Step H] Creating interactive grips...");
+            GenerateOpeningGrips(db, tr, btr);
+        }
+
+        /// <summary>
+        /// [V2] Update visual satu dinding saja (dipanggil oleh Reactor).
+        /// </summary>
+        public static void BakeSingleWall(Autodesk.AutoCAD.DatabaseServices.Database db, ObjectId lineId)
+        {
+            // Tangguhkan reactor agar tidak memicu recursion
+            Core.Services.WallSyncReactor.IsSuspended = true;
+            try
+            {
+                using (Transaction tr = db.TransactionManager.StartTransaction())
+                {
+                    // Untuk saat ini, kita tetap panggil Global BakeAll 
+                    // namun kedepannya bisa di-optimize per-entity.
+                    BakeAllWalls(db, tr);
+                    tr.Commit();
+                }
+            }
+            finally
+            {
+                Core.Services.WallSyncReactor.IsSuspended = false;
+            }
+        }
+
+        private static void GenerateOpeningGrips(Database db, Transaction tr, BlockTableRecord btr)
+        {
+            // Kita scan ulang line yang punya wall data
+            ObjectId[] ids = btr.Cast<ObjectId>().ToArray();
+            foreach (ObjectId id in ids)
+            {
+                if (id.IsErased) continue;
+                Line? wallLine = tr.GetObject(id, OpenMode.ForRead) as Line;
+                if (wallLine == null) continue;
+
+                WallData? data = XDataManager.GetWallData(wallLine);
+                if (data == null || data.Openings.Count == 0) continue;
+
+                Point3d S = wallLine.StartPoint;
+                Point3d E = wallLine.EndPoint;
+                Vector3d dir = (E - S).GetNormal();
+
+                for (int i = 0; i < data.Openings.Count; i++)
+                {
+                    var op = data.Openings[i];
+                    double startDist = op.Position - (op.Width / 2.0);
+                    double endDist   = op.Position + (op.Width / 2.0);
+
+                    Line grip = new Line(S + dir * startDist, S + dir * endDist);
+                    grip.SetDatabaseDefaults();
+                    grip.Layer = StandardManager.Instance.GetLayer("Grip");
+                    grip.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByLayer, 256);
+                    
+                    TagAsView(grip); // Agar kena Purge saat Rebuild
+                    XDataManager.AttachGripData(tr, db, grip, wallLine.Handle.ToString(), i);
+
+                    btr.AppendEntity(grip);
+                    tr.AddNewlyCreatedDBObject(grip, true);
+                }
+            }
+        }
+
+        private static Hatch BuildHatch(Polyline boundary)
+        {
+            Hatch hatch = new Hatch();
+            hatch.SetDatabaseDefaults();
+            // [STANDARD] Ganti Pattern ke SOLID sesuai permintaan user
+            hatch.SetHatchPattern(HatchPatternType.PreDefined, "SOLID");
+            
+            // Set Layer & Warna dari Standard
+            hatch.Layer = StandardManager.Instance.GetLayer("WallHatch");
+            hatch.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByLayer, 256); // ByLayer
+
+            hatch.AppendLoop(HatchLoopTypes.Default, new ObjectIdCollection { boundary.ObjectId });
+            hatch.EvaluateHatch(true);
+            return hatch;
+        }
+
+        private static void GenerateVisualOutline(WallModel model, Transaction tr, BlockTableRecord btr)
+        {
+            // Skin Kiri (V0 -> V1) & Kanan (V2 -> V3)
+            CreateVisualLine(model.V0, model.V1, tr, btr);
+            CreateVisualLine(model.V2, model.V3, tr, btr);
+
+            // Cap Start (V3 -> V0) - Jika TIDAK ADA joint di awal
+            if (!model.HasStartJoin)
+                CreateVisualLine(model.V3, model.V0, tr, btr);
+
+            // Cap End (V1 -> V2) - Jika TIDAK ADA joint di akhir
+            if (!model.HasEndJoin)
+                CreateVisualLine(model.V1, model.V2, tr, btr);
+        }
+
+        private static void CreateVisualLine(Point2d start, Point2d end, Transaction tr, BlockTableRecord btr)
+        {
+            Line line = new Line(new Point3d(start.X, start.Y, 0), new Point3d(end.X, end.Y, 0));
+            line.SetDatabaseDefaults();
+
+            // [STANDARD] Set Layer & Warna sesuai standard "Wall"
+            line.Layer = StandardManager.Instance.GetLayer("Wall");
+            line.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByLayer, 256); // ByLayer
+
+            TagAsView(line);
+            btr.AppendEntity(line);
+            tr.AddNewlyCreatedDBObject(line, true);
         }
 
         // ══════════════════════════════════════════════════════════════════════
         // PRIVATE PIPELINE STEPS
         // ══════════════════════════════════════════════════════════════════════
 
-        // ── Step A ────────────────────────────────────────────────────────────
-        private static List<WallModel> BuildWallModels(BlockTableRecord btr, Transaction tr)
+        // ── Step A (Slicing Logic) ────────────────────────────────────────────
+        private static List<WallModel> BuildWallModels(BlockTableRecord btr, Transaction tr, List<OpeningInstance> openingInstances)
         {
-            // Collect Line IDs dulu (hindari iterasi + query bersamaan)
+            var editor = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor;
+            
             List<ObjectId> lineIds = new List<ObjectId>();
-            foreach (ObjectId id in btr)
+            ObjectId[] ids = btr.Cast<ObjectId>().ToArray();
+            foreach (ObjectId id in ids)
             {
                 if (!id.IsErased && id.ObjectClass.IsDerivedFrom(RXClass.GetClass(typeof(Line))))
                     lineIds.Add(id);
             }
 
             List<WallModel> models = new List<WallModel>();
+            string targetLayer = StandardManager.Instance.GetLayer("Centerline");
+
             foreach (ObjectId lineId in lineIds)
             {
                 Line? line = tr.GetObject(lineId, OpenMode.ForRead) as Line;
                 if (line == null) continue;
 
+                // [V2 SAFETY] Skip visual skins/caps: Hanya proses garis di layer Centerline
+                if (line.Layer != targetLayer) continue;
+
                 WallData? data = XDataManager.GetWallData(line);
-                if (data == null) continue;  // Bukan Line KTP CoreCAD, skip
+                if (data == null) continue;
 
-                Point2d s    = new Point2d(line.StartPoint.X, line.StartPoint.Y);
-                Point2d e    = new Point2d(line.EndPoint.X,   line.EndPoint.Y);
-                double  half = data.Thickness / 2.0;
+                Point2d S = new Point2d(line.StartPoint.X, line.StartPoint.Y);
+                Point2d E = new Point2d(line.EndPoint.X,   line.EndPoint.Y);
+                Vector2d fullDir = (E - S).GetNormal();
+                double fullLen = (E - S).Length;
 
-                // Vektor normalisasi arah dan perpendikular kiri
-                Vector2d dir  = new Vector2d(e.X - s.X, e.Y - s.Y).GetNormal();
-                Vector2d perp = new Vector2d(-dir.Y, dir.X);
-
-                // Vertex default: sudut siku-siku (90°)
-                models.Add(new WallModel
+                // [OPENING SLICER]
+                List<double> splitPoints = new List<double> { 0.0, fullLen };
+                foreach (var op in data.Openings)
                 {
-                    LineId    = lineId,
-                    Thickness = data.Thickness,
-                    Start     = s,
-                    End       = e,
-                    V0 = new Point2d(s.X + perp.X * half, s.Y + perp.Y * half),  // Start-Left
-                    V1 = new Point2d(e.X + perp.X * half, e.Y + perp.Y * half),  // End-Left
-                    V2 = new Point2d(e.X - perp.X * half, e.Y - perp.Y * half),  // End-Right
-                    V3 = new Point2d(s.X - perp.X * half, s.Y - perp.Y * half),  // Start-Right
-                });
+                    double startOp = op.Position - (op.Width / 2.0);
+                    double endOp   = op.Position + (op.Width / 2.0);
+                    
+                    if (startOp > 0.1 && startOp < fullLen - 0.1) splitPoints.Add(startOp);
+                    if (endOp > 0.1 && endOp < fullLen - 0.1) splitPoints.Add(endOp);
+
+                    openingInstances.Add(new OpeningInstance {
+                        BlockName = op.BlockName,
+                        Location = S + (fullDir * op.Position),
+                        Direction = fullDir,
+                        Thickness = data.Thickness
+                    });
+                }
+                splitPoints.Sort();
+
+                int segmentCount = 0;
+                // Build Solid Segments
+                for (int i = 0; i < splitPoints.Count - 1; i++)
+                {
+                    double d1 = splitPoints[i];
+                    double d2 = splitPoints[i+1];
+                    if (d2 - d1 < 1.0) continue; // Safety: abaikan yang < 1mm
+
+                    double mid = (d1 + d2) / 2.0;
+
+                    bool isGap = false;
+                    foreach (var op in data.Openings)
+                    {
+                        double startOp = op.Position - (op.Width / 2.0);
+                        double endOp   = op.Position + (op.Width / 2.0);
+                        if (mid > startOp + 0.1 && mid < endOp - 0.1) { isGap = true; break; }
+                    }
+
+                    if (isGap) continue;
+
+                    segmentCount++;
+                    Point2d segS = S + (fullDir * d1);
+                    Point2d segE = S + (fullDir * d2);
+                    double half = data.Thickness / 2.0;
+                    Vector2d perp = new Vector2d(-fullDir.Y, fullDir.X);
+
+                    models.Add(new WallModel {
+                        LineId = lineId,
+                        Thickness = data.Thickness,
+                        Start = segS,
+                        End   = segE,
+                        V0 = segS + perp * half,
+                        V1 = segE + perp * half,
+                        V2 = segE - perp * half,
+                        V3 = segS - perp * half,
+                    });
+                }
+                
+                editor.WriteMessage($"\n[Debug] Wall {data.Id.Substring(0,8)}: Len {fullLen:F0}, Openings: {data.Openings.Count}, Generated Segments: {segmentCount}");
             }
             return models;
         }
@@ -213,6 +400,14 @@ namespace CoreCAD.Engine
                         if (useButt) ApplyButtJoin(a, isStartOfA: false, b);
                         else ApplyMiter(a, isStartOfA: false, b, isStartOfB: false);
                     }
+
+                    // --- [T-JUNCTION DETECTION] ---
+                    // Cek jika ujung B menabrak tengah-tengah segmen A
+                    if (WallMath.IsPointOnSegment(b.Start, a.Start, a.End))
+                        ApplyTJoin(b, isStartOfB: true, a);
+
+                    if (WallMath.IsPointOnSegment(b.End, a.Start, a.End))
+                        ApplyTJoin(b, isStartOfB: false, a);
                 }
             }
         }
@@ -228,52 +423,69 @@ namespace CoreCAD.Engine
         /// </summary>
         private static void ApplyMiter(WallModel a, bool isStartOfA, WallModel b, bool isStartOfB)
         {
-            Vector2d dirA = isStartOfA ? a.Direction : -a.Direction;
-            Vector2d dirB = isStartOfB ? b.Direction : -b.Direction;
+            Vector2d u1 = isStartOfA ? a.Direction : -a.Direction;
+            Vector2d u2 = isStartOfB ? b.Direction : -b.Direction;
 
-            // [ANTI-BUTTERFLY] Hitung Cross Product untuk tahu arah belokan
-            // Positive = Belok Kiri, Negative = Belok Kanan
-            double cross = (dirA.X * dirB.Y) - (dirA.Y * dirB.X);
+            // [ANTI-NGACO] Cross Product untuk arah belokan dan stabilitas
+            double cross = (u1.X * u2.Y) - (u1.Y * u2.X);
+            if (System.Math.Abs(cross) < 0.001) return; // Collinear: Tidak perlu miter miring
+
+            // [STEP B] Vektor Bisector (Membagi sudut u1 dan u2)
+            Vector2d? vBis = WallMath.CalculateBisector(u1, u2);
+            if (!vBis.HasValue) return;
+            Vector2d bis = vBis.Value;
+
+            // [STEP C] Hitung Panjang Miter via Sinus Setengah Sudut
+            // θ = sudut antara u1 dan u2 (0 s/d 180)
+            double dot = u1.X * u2.X + u1.Y * u2.Y;
+            dot = System.Math.Clamp(dot, -1.0, 1.0);
+            double theta = System.Math.Acos(dot);
             
-            // Jika sangat mendekati nol, dinding sejajar (Straight) — tidak perlu miter miring
-            if (System.Math.Abs(cross) < 1e-4) return;
+            double halfA = a.Thickness / 2.0;
+            double sinHalfTheta = System.Math.Sin(theta / 2.0);
+            
+            // L_miter = (T/2) / sin(θ/2)
+            double miterLen = halfA / (sinHalfTheta + 1e-9);
 
-            Vector2d perpA = new Vector2d(-dirA.Y, dirA.X); // Left Perp
-            Vector2d perpB = new Vector2d(-dirB.Y, dirB.X); // Left Perp
+            // [LIMITASI] Pagar pengaman: Maksimal 2x tebal dinding
+            double maxLen = a.Thickness * 2.0;
+            if (miterLen > maxLen) miterLen = maxLen;
 
             Point2d J = isStartOfA ? a.Start : a.End;
             Point2d J_other = isStartOfA ? a.End : a.Start;
 
-            double halfA = a.Thickness / 2.0;
-            double halfB = b.Thickness / 2.0;
+            // [STEP D] Tentukan Inner & Outer Point
+            // Bisector (u1+u2) selalu menunjuk ke sisi "Dalam" (Inner)
+            Point2d pInner = new Point2d(J.X + bis.X * miterLen, J.Y + bis.Y * miterLen);
+            Point2d pOuter = new Point2d(J.X - bis.X * miterLen, J.Y - bis.Y * miterLen);
 
-            // --- CALCULATE MITER INTERSECTIONS ---
-            // Left A ∩ Left B
-            Point2d leftA = new Point2d(J.X + perpA.X * halfA, J.Y + perpA.Y * halfA);
-            Point2d leftB = new Point2d(J.X + perpB.X * halfB, J.Y + perpB.Y * halfB);
-            Point2d? leftMiter = WallMath.GetLineIntersection(leftA, dirA, leftB, dirB);
+            // [TOPOLOGI] Mapping berdasarkan arah belokan (Cross) dan lokasi junction (Start/End)
+            Point2d pLeft, pRight;
+            if (cross > 0) // Belok Kiri: Inner adalah Kiri, Outer adalah Kanan
+            {
+                pLeft = pInner;
+                pRight = pOuter;
+            }
+            else // Belok Kanan: Inner adalah Kanan, Outer adalah Kiri
+            {
+                pLeft = pOuter;
+                pRight = pInner;
+            }
 
-            // Right A ∩ Right B
-            Point2d rightA = new Point2d(J.X - perpA.X * halfA, J.Y - perpA.Y * halfA);
-            Point2d rightB = new Point2d(J.X - perpB.X * halfB, J.Y - perpB.Y * halfB);
-            Point2d? rightMiter = WallMath.GetLineIntersection(rightA, dirA, rightB, dirB);
-
-            // --- MAPPING & VALIDATION ---
-            // Kita harus tetap memetakan Left Miter ke Left Vertex (V0/V1) 
-            // dan Right Miter ke Right Vertex (V3/V2) untuk menjaga topologi poligon.
+            // [ASSIGNMENT] Gunakan perbaikan topologi Phase 2: End junction menukar mapping
             if (isStartOfA)
             {
-                if (leftMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, leftMiter.Value)) 
-                    a.V0 = leftMiter.Value;
-                if (rightMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, rightMiter.Value))
-                    a.V3 = rightMiter.Value;
+                // Start: Left -> V0, Right -> V3
+                if (WallMath.ValidateMiterPoint(J, J_other, pLeft)) a.V0 = pLeft;
+                if (WallMath.ValidateMiterPoint(J, J_other, pRight)) a.V3 = pRight;
+                a.HasStartJoin = true; 
             }
             else
             {
-                if (leftMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, leftMiter.Value))
-                    a.V1 = leftMiter.Value;
-                if (rightMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, rightMiter.Value))
-                    a.V2 = rightMiter.Value;
+                // End: pLeft -> V2 (Right), pRight -> V1 (Left)
+                if (WallMath.ValidateMiterPoint(J, J_other, pLeft)) a.V2 = pLeft;
+                if (WallMath.ValidateMiterPoint(J, J_other, pRight)) a.V1 = pRight;
+                a.HasEndJoin = true;
             }
         }
 
@@ -314,13 +526,50 @@ namespace CoreCAD.Engine
 
             if (isStartOfA)
             {
+                // Start: Left -> V0, Right -> V3
                 if (pLeft.HasValue) a.V0 = pLeft.Value;
                 if (pRight.HasValue) a.V3 = pRight.Value;
+                a.HasStartJoin = true;
             }
             else
             {
-                if (pLeft.HasValue) a.V1 = pLeft.Value;
-                if (pRight.HasValue) a.V2 = pRight.Value;
+                // End: Left (backward) -> V2, Right (backward) -> V1
+                if (pLeft.HasValue) a.V2 = pLeft.Value;
+                if (pRight.HasValue) a.V1 = pRight.Value;
+                a.HasEndJoin = true;
+            }
+        }
+
+        /// <summary>
+        /// [ROBUST] T-Junction Algorithm: Skin Projection.
+        /// Retract ujung dinding 'branch' sejauh tebal_main/2 agar berhenti di 'Kulit' main.
+        /// </summary>
+        private static void ApplyTJoin(WallModel branch, bool isStartOfB, WallModel main)
+        {
+            double offsetDist = main.Thickness / 2.0;
+
+            // Vektor arah branch (menjauhi endpoint)
+            Vector2d dir = branch.Direction;
+            if (!isStartOfB) dir = -dir; // Arah mundur
+
+            // Offset mundur (Vektor_Arah_B * Jarak)
+            Vector2d retract = dir * offsetDist;
+
+            if (isStartOfB)
+            {
+                // Start B hits Main A
+                // V0 (Left) dan V3 (Right) dimundurkan sejauh retract
+                branch.V0 = branch.V0 + retract;
+                branch.V3 = branch.V3 + retract;
+                branch.HasStartJoin = true;
+            }
+            else
+            {
+                // End B hits Main A
+                // V1 (Left) dan V2 (Right) dimundurkan sejauh retract
+                branch.V1 = branch.V1 + retract;
+                branch.V2 = branch.V2 + retract;
+                branch.HasEndJoin = true;
             }
         }
 
@@ -367,6 +616,30 @@ namespace CoreCAD.Engine
             {
                 ent.XData = rb;
             }
+        }
+
+        private static void InsertOpeningBlock(OpeningInstance op, Transaction tr, BlockTableRecord btr)
+        {
+            Database db = btr.Database;
+            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+
+            // Jika Block tdk ditemukan, gambar kotak placeholder saja
+            if (string.IsNullOrEmpty(op.BlockName) || !bt.Has(op.BlockName))
+            {
+                // Placeholder logic (garis silang atau kotak)
+                return;
+            }
+
+            BlockReference br = new BlockReference(new Point3d(op.Location.X, op.Location.Y, 0), bt[op.BlockName]);
+            br.SetDatabaseDefaults();
+            br.Rotation = op.Direction.Angle;
+            
+            // Set Layer "Door"
+            br.Layer = StandardManager.Instance.GetLayer("Door");
+            
+            TagAsView(br);
+            btr.AppendEntity(br);
+            tr.AddNewlyCreatedDBObject(br, true);
         }
     }
 }
