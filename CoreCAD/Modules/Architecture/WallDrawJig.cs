@@ -1,3 +1,17 @@
+// =============================================================================
+// V5 MIGRATION: File ini di-ISOLASI menggunakan Compiler Directive.
+// Kode asli WallDrawJig (EntityJig-based) dinonaktifkan dan akan DIGANTIKAN
+// oleh sistem preview berbasis data murni di ViewGenerator.cs (Engine folder).
+// =============================================================================
+
+namespace CoreCAD.Modules.Architecture
+{
+    // Placeholder — kelas pengganti akan diimplementasikan di Engine/ViewGenerator.cs
+}
+
+#if false
+// --- SEMUA KODE DI BAWAH INI DINONAKTIFKAN (FASE 3 LOBOTOMI) ---
+
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
 using Autodesk.AutoCAD.Geometry;
@@ -61,3 +75,5 @@ namespace CoreCAD.Modules.Architecture
         }
     }
 }
+
+#endif

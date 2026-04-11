@@ -31,10 +31,19 @@ namespace CoreCAD.Modules.Architecture
                 LayerService.EnsureLayer(currDb, tr, LayerService.WallHatchLayer, LayerService.ColorWallHatch);
             }, "Standard Architectural Layers Initialized.");
 
-            // 2. Simple Point A -> Point B Flow
+            // 2. V5: Point A -> Point B (JigPrompts langsung, tanpa WallDrawJig class)
             PromptPointOptions ppo1 = new PromptPointOptions("\nSpecify wall start point: ");
             PromptPointResult ppr1 = ed.GetPoint(ppo1);
             if (ppr1.Status != PromptStatus.OK) return;
+
+            PromptPointOptions ppo2 = new PromptPointOptions("\nSpecify wall end point: ")
+            {
+                BasePoint = ppr1.Value,
+                UseBasePoint = true,
+                UseDashedLine = true
+            };
+            PromptPointResult ppr2 = ed.GetPoint(ppo2);
+            if (ppr2.Status != PromptStatus.OK) return;
 
             SmartWall wall = new SmartWall
             {
@@ -43,13 +52,9 @@ namespace CoreCAD.Modules.Architecture
                 MaterialId = JsonService.GetDefaultMaterial(),
                 LevelId = JsonService.GetCurrentLevel(),
                 StartPoint = ppr1.Value,
-                EndPoint = ppr1.Value,
+                EndPoint = ppr2.Value,
                 PseudoZ = ppr1.Value.Z
             };
-
-            WallDrawJig jig = new WallDrawJig(wall);
-            PromptResult jr = ed.Drag(jig);
-            if (jr.Status != PromptStatus.OK) return;
 
             // 3. Commit Parent & Children
             TransactionHelper.ExecuteAtomic((tr, currDb, currEd) =>
@@ -82,7 +87,6 @@ namespace CoreCAD.Modules.Architecture
                     btr.AppendEntity(hatch);
                     tr.AddNewlyCreatedDBObject(hatch, true);
 
-                    // Enable associativity AFTER appending to database
                     hatch.Associative = true;
                     hatch.AppendLoop(HatchLoopTypes.Default, new ObjectIdCollection { pl.ObjectId });
                     hatch.EvaluateHatch(true);
@@ -94,9 +98,7 @@ namespace CoreCAD.Modules.Architecture
                     DrawOrderTable dot = (DrawOrderTable)tr.GetObject(btr.DrawOrderTableId, OpenMode.ForWrite);
                     dot.MoveToBottom(new ObjectIdCollection { hatch.ObjectId });
 
-                    // Track children for logical linking
-                    ObjectIdCollection childrenIds = new ObjectIdCollection { pl.ObjectId, hatch.ObjectId };
-                    XDataManager.LinkChildren(line, childrenIds.Cast<ObjectId>(), tr);
+                    XDataManager.LinkChildren(line, new ObjectId[] { pl.ObjectId, hatch.ObjectId }, tr);
                 }
             }, "SmartWall V5 created.");
 
@@ -136,6 +138,5 @@ namespace CoreCAD.Modules.Architecture
 
             ed.Regen();
         }
-
     }
 }
