@@ -1,30 +1,32 @@
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
-using CoreCAD.Persistence;  // CoreCAD.Database namespace → CoreCAD.Persistence (anti-collision)
+using Autodesk.AutoCAD.Runtime;
+using CoreCAD.Persistence;  // CoreCAD.Database folder → namespace CoreCAD.Persistence
 using CoreCAD.Models;
 using System.Collections.Generic;
 
 namespace CoreCAD.Engine
 {
     /// <summary>
-    /// [V5 ENGINE] Mesin Cetak — mengeksekusi siklus Purge → Bake:
-    ///   PurgeOldViews : hapus semua Polyline berisi XData "CORECAD_VIEW"
-    ///   BakeAllWalls  : cetak Polyline baru untuk tiap Line berXData "CORECAD_MODEL"
+    /// [V5 ENGINE] Mesin Cetak + Tukang Cat — siklus Purge → Bake:
+    ///   PurgeOldViews : hapus semua entitas berXData "CORECAD_VIEW" (Polyline + Hatch)
+    ///   BakeAllWalls  : cetak Polyline kotak + Hatch ANSI31 untuk tiap Line KTP
     /// </summary>
     public static class ViewGenerator
     {
         public const string APP_VIEW_NAME = "CORECAD_VIEW";
 
+        // ── PURGE ────────────────────────────────────────────────────────────────
         /// <summary>
-        /// Tahap 1 — Purge: kumpulkan semua ObjectId view lama, lalu hapus.
-        /// CATATAN: Tidak boleh Erase dalam iterasi aktif — kita collect dulu.
+        /// Kumpulkan semua ObjectId bertanda CORECAD_VIEW, lalu hapus setelah iterasi.
+        /// WAJIB dua pass: tidak boleh Erase dalam iterasi aktif BlockTableRecord.
         /// </summary>
         public static void PurgeOldViews(Autodesk.AutoCAD.DatabaseServices.Database db, Transaction tr)
         {
-            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
+            BlockTable bt   = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
             BlockTableRecord btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForRead);
 
-            // Pass 1: kumpulkan ID view yang akan dihapus
+            // Pass 1 — collect
             List<ObjectId> toErase = new List<ObjectId>();
             foreach (ObjectId id in btr)
             {
@@ -40,7 +42,7 @@ namespace CoreCAD.Engine
                 }
             }
 
-            // Pass 2: hapus setelah iterasi selesai
+            // Pass 2 — erase (iterasi sudah selesai, aman)
             foreach (ObjectId id in toErase)
             {
                 Entity ent = (Entity)tr.GetObject(id, OpenMode.ForWrite);
@@ -48,12 +50,16 @@ namespace CoreCAD.Engine
             }
         }
 
+        // ── BAKE ─────────────────────────────────────────────────────────────────
         /// <summary>
-        /// Tahap 2 — Bake: cetak Polyline kotak untuk setiap MASTER Line yang punya KTP.
+        /// Untuk setiap Line yang punya KTP (WallData), cetak:
+        ///   1. Polyline kotak (batas dinding)
+        ///   2. Hatch ANSI31 dengan batas Polyline tersebut
+        /// Keduanya diberi stempel "CORECAD_VIEW" agar ikut ter-purge saat CC_REBUILD.
         /// </summary>
         public static void BakeAllWalls(Autodesk.AutoCAD.DatabaseServices.Database db, Transaction tr)
         {
-            // Pastikan RegApp "CORECAD_VIEW" terdaftar
+            // Pastikan RegApp VIEW terdaftar
             RegAppTable rat = (RegAppTable)tr.GetObject(db.RegAppTableId, OpenMode.ForRead);
             if (!rat.Has(APP_VIEW_NAME))
             {
@@ -63,23 +69,19 @@ namespace CoreCAD.Engine
                 tr.AddNewlyCreatedDBObject(ratr, true);
             }
 
-            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-            // Buka ForWrite sekarang karena kita akan AppendEntity
+            BlockTable bt   = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
             BlockTableRecord btr = (BlockTableRecord)tr.GetObject(bt[BlockTableRecord.ModelSpace], OpenMode.ForWrite);
 
-            // Kumpulkan Line master dulu (hindari iterasi bersamaan dengan append)
+            // Pass 1 — collect Line yang punya KTP (hindari iterasi + append bersamaan)
             List<ObjectId> masterLines = new List<ObjectId>();
             foreach (ObjectId id in btr)
             {
                 if (id.IsErased) continue;
-                if (id.ObjectClass.IsDerivedFrom(
-                    Autodesk.AutoCAD.Runtime.RXClass.GetClass(typeof(Line))))
-                {
+                if (id.ObjectClass.IsDerivedFrom(RXClass.GetClass(typeof(Line))))
                     masterLines.Add(id);
-                }
             }
 
-            // Bake: satu Polyline per Line yang punya WallData KTP
+            // Pass 2 — bake Polyline + Hatch per Line
             foreach (ObjectId lineId in masterLines)
             {
                 Line? wallLine = tr.GetObject(lineId, OpenMode.ForRead) as Line;
@@ -88,26 +90,41 @@ namespace CoreCAD.Engine
                 WallData? data = XDataManager.GetWallData(wallLine);
                 if (data == null) continue;
 
+                // 1. CETAK POLYLINE KOTAK
                 Polyline wallPoly = BuildWallPolyline(wallLine, data.Thickness);
                 btr.AppendEntity(wallPoly);
                 tr.AddNewlyCreatedDBObject(wallPoly, true);
 
-                // Tandai sebagai VIEW agar bisa di-purge berikutnya
-                ResultBuffer rbView = new ResultBuffer(
-                    new TypedValue((int)DxfCode.ExtendedDataRegAppName, APP_VIEW_NAME),
-                    new TypedValue((int)DxfCode.ExtendedDataAsciiString, "IS_VIEW:TRUE")
-                );
-                wallPoly.XData = rbView;
-                rbView.Dispose();
+                // Stempel VIEW di Polyline
+                TagAsView(wallPoly);
+
+                // 2. CETAK HATCH ANSI31
+                Hatch wallHatch = new Hatch();
+                wallHatch.SetDatabaseDefaults();
+                wallHatch.SetHatchPattern(HatchPatternType.PreDefined, "ANSI31");
+                wallHatch.PatternScale = 15.0;
+
+                // Wajib AppendEntity sebelum AppendLoop (butuh valid ObjectId)
+                btr.AppendEntity(wallHatch);
+                tr.AddNewlyCreatedDBObject(wallHatch, true);
+
+                // Hubungkan Polyline sebagai batas Hatch
+                ObjectIdCollection boundaryIds = new ObjectIdCollection { wallPoly.ObjectId };
+                wallHatch.AppendLoop(HatchLoopTypes.Default, boundaryIds);
+                wallHatch.EvaluateHatch(true);
+
+                // Stempel VIEW di Hatch agar ikut ter-purge
+                TagAsView(wallHatch);
             }
         }
 
-        // ── Helper: hitung 4 sudut kotak dinding dan kembalikan Polyline ──────────
+        // ── Helpers ──────────────────────────────────────────────────────────────
+
         private static Polyline BuildWallPolyline(Line wallLine, double thickness)
         {
             Point3d start = wallLine.StartPoint;
             Point3d end   = wallLine.EndPoint;
-            double half   = thickness / 2.0;
+            double  half  = thickness / 2.0;
 
             Vector2d dir  = new Vector2d(end.X - start.X, end.Y - start.Y).GetNormal();
             Vector2d perp = new Vector2d(-dir.Y, dir.X) * half;
@@ -125,6 +142,21 @@ namespace CoreCAD.Engine
             poly.AddVertexAt(3, p4, 0, 0, 0);
             poly.Closed = true;
             return poly;
+        }
+
+        /// <summary>
+        /// Tempelkan stempel CORECAD_VIEW ke entitas.
+        /// Entitas sudah harus ada di database (AppendEntity sudah dipanggil).
+        /// </summary>
+        private static void TagAsView(Entity ent)
+        {
+            using (ResultBuffer rb = new ResultBuffer(
+                new TypedValue((int)DxfCode.ExtendedDataRegAppName, APP_VIEW_NAME),
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, "IS_VIEW:TRUE")
+            ))
+            {
+                ent.XData = rb;
+            }
         }
     }
 }
