@@ -1,3 +1,19 @@
+// =============================================================================
+// V5 MIGRATION: File ini di-ISOLASI menggunakan Compiler Directive.
+// Perintah CC_WALL dan CC_CENTERLINE lama di-disable karena:
+//   - CC_WALL       digantikan oleh Commands/CmdWall.cs (sistem KTP baru)
+//   - CC_CENTERLINE belum ada penggantinya, akan dimigrasi ke Commands/ belakangan
+// Dua CommandMethod dengan nama sama = error NETLOAD di AutoCAD.
+// =============================================================================
+
+namespace CoreCAD.Modules.Architecture
+{
+    // File ini sengaja dikosongkan. Kode asli ada di blok #if false di bawah.
+}
+
+#if false
+// --- SEMUA KODE DI BAWAH INI DINONAKTIFKAN (FASE 3 LOBOTOMI) ---
+
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.EditorInput;
@@ -12,7 +28,7 @@ using System.Linq;
 
 namespace CoreCAD.Modules.Architecture
 {
-    public class Commands
+    public class Commands_LEGACY
     {
         [CommandMethod("CC_WALL", CommandFlags.Modal)]
         public void CreateSmartWall()
@@ -23,7 +39,6 @@ namespace CoreCAD.Modules.Architecture
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
-            // 1. Initial Standard Layers
             TransactionHelper.ExecuteAtomic((tr, currDb, currEd) =>
             {
                 LayerService.EnsureLayer(currDb, tr, LayerService.CenterlineLayer, LayerService.ColorCenterline, "CENTER");
@@ -31,7 +46,6 @@ namespace CoreCAD.Modules.Architecture
                 LayerService.EnsureLayer(currDb, tr, LayerService.WallHatchLayer, LayerService.ColorWallHatch);
             }, "Standard Architectural Layers Initialized.");
 
-            // 2. V5: Point A -> Point B (JigPrompts langsung, tanpa WallDrawJig class)
             PromptPointOptions ppo1 = new PromptPointOptions("\nSpecify wall start point: ");
             PromptPointResult ppr1 = ed.GetPoint(ppo1);
             if (ppr1.Status != PromptStatus.OK) return;
@@ -56,12 +70,10 @@ namespace CoreCAD.Modules.Architecture
                 PseudoZ = ppr1.Value.Z
             };
 
-            // 3. Commit Parent & Children
             TransactionHelper.ExecuteAtomic((tr, currDb, currEd) =>
             {
                 BlockTableRecord btr = (BlockTableRecord)tr.GetObject(currDb.CurrentSpaceId, OpenMode.ForWrite);
 
-                // A. Parent Line (Centerline)
                 Line line = new Line(wall.StartPoint, wall.EndPoint);
                 line.SetDatabaseDefaults();
                 line.Layer = LayerService.CenterlineLayer;
@@ -71,7 +83,6 @@ namespace CoreCAD.Modules.Architecture
                 wall.Role = "MASTER";
                 wall.SaveToXData(line, tr);
 
-                // B. Boundary Polyline
                 Point3dCollection pts = wall.GetVertices();
                 if (pts.Count >= 4)
                 {
@@ -82,7 +93,6 @@ namespace CoreCAD.Modules.Architecture
                     wall.Role = "FOLLOWER";
                     wall.SaveToXData(pl, tr);
 
-                    // C. Associative Hatch
                     Hatch hatch = WallGeometryService.CreateWallHatch(pl, LayerService.WallHatchLayer);
                     btr.AppendEntity(hatch);
                     tr.AddNewlyCreatedDBObject(hatch, true);
@@ -94,7 +104,6 @@ namespace CoreCAD.Modules.Architecture
                     wall.Role = "FOLLOWER";
                     wall.SaveToXData(hatch, tr);
 
-                    // D. Draw Order: Send Hatch to Back
                     DrawOrderTable dot = (DrawOrderTable)tr.GetObject(btr.DrawOrderTableId, OpenMode.ForWrite);
                     dot.MoveToBottom(new ObjectIdCollection { hatch.ObjectId });
 
@@ -140,3 +149,5 @@ namespace CoreCAD.Modules.Architecture
         }
     }
 }
+
+#endif
