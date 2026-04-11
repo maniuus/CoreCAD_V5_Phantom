@@ -1,62 +1,68 @@
+using Autodesk.AutoCAD.Runtime;
 using Autodesk.AutoCAD.ApplicationServices;
 using Autodesk.AutoCAD.DatabaseServices;
-using Autodesk.AutoCAD.Runtime;
-using CoreCAD.Core.Geometry;
 using CoreCAD.Core.Services;
-using CoreCAD.Commands;
 using CoreCAD.Overrules;
 using System;
 
-// CRITICAL: Explicit assembly-level hints for AutoCAD command scanner
-// Required for reliable loading in AutoCAD 2025 (.NET 8)
 [assembly: ExtensionApplication(typeof(CoreCAD.Core.Initializer))]
-[assembly: CommandClass(typeof(CoreCAD.Commands.CmdWall))]
-[assembly: CommandClass(typeof(CoreCAD.Commands.CmdRebuild))]
 
 namespace CoreCAD.Core
 {
+    /// <summary>
+    /// File inisialisasi aplikasi saat DLL di-load ke AutoCAD.
+    /// Tempat pendaftaran Reactor, Overrule, dan Standard Loader.
+    /// </summary>
     public class Initializer : IExtensionApplication
     {
         public void Initialize()
         {
-            try
+            var doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
+            if (doc != null)
             {
-                // 1. Subscribe to FUTURE document creations
-                Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.DocumentCreated += OnDocumentCreated;
-                Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.DocumentToBeDestroyed += OnDocumentToBeDestroyed;
-
-                // 2. Attach to ALL CURRENTLY open documents
-                foreach (Document doc in Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager)
-                {
-                    if (doc.Database != null)
-                    {
-                        WallSyncReactor.Instance.Register(doc.Database);
-                        WallSyncReactor.Instance.RegisterDocEvents(doc);
-                    }
-                }
-                
-                // Global Settings
-                Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("PROXYGRAPHICS", 1);
-
-                // 3. Register OVERRULES
-                Overrule.AddOverrule(RXClass.GetClass(typeof(Entity)), WallViewGripOverrule.Instance, true);
-                Overrule.Overruling = true;
+                doc.Editor.WriteMessage("\n[CoreCAD V5] Loading Engine (Master Stable)...");
+                doc.Editor.WriteMessage("\n[CoreCAD V5] Standards: A-WALL, A-WALL-HATCH, C-CENT.");
+                doc.Editor.WriteMessage("\n[CoreCAD V5] Engine Ready.\n");
             }
-            catch { }
+
+            // 1. Subscribe to FUTURE document creations
+            Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.DocumentCreated += OnDocumentCreated;
+            Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.DocumentToBeDestroyed += OnDocumentToBeDestroyed;
+
+            // 2. Attach to ALL CURRENTLY open documents
+            foreach (Document d in Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager)
+            {
+                if (d.Database != null)
+                {
+                    WallSyncReactor.Instance.Register(d.Database);
+                }
+            }
+
+            // [STANDARD] Muat konfigurasi dari drawing_standard.json
+            StandardManager.Instance.Load();
+
+            // [OVERRULE] Registrasi WallViewGripOverrule
+            // Ini akan menekan tampilan grip (titik biru) pada raga dinding.
+            GripOverrule.AddOverrule(RXClass.GetClass(typeof(Entity)), WallViewGripOverrule.Instance, false);
+            
+            // Aktifkan Overrule secara global
+            Autodesk.AutoCAD.Runtime.Overrule.Overruling = true;
+
+            // Global Settings
+            Autodesk.AutoCAD.ApplicationServices.Application.SetSystemVariable("PROXYGRAPHICS", 1);
         }
 
         private void OnDocumentCreated(object sender, DocumentCollectionEventArgs e)
         {
-            if (e.Document != null && e.Document.Database != null)
+            if (e.Document?.Database != null)
             {
                 WallSyncReactor.Instance.Register(e.Document.Database);
-                WallSyncReactor.Instance.RegisterDocEvents(e.Document);
             }
         }
 
         private void OnDocumentToBeDestroyed(object sender, DocumentCollectionEventArgs e)
         {
-            if (e.Document != null && e.Document.Database != null)
+            if (e.Document?.Database != null)
             {
                 WallSyncReactor.Instance.Unregister(e.Document.Database);
             }
@@ -69,16 +75,16 @@ namespace CoreCAD.Core
                 Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.DocumentCreated -= OnDocumentCreated;
                 Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.DocumentToBeDestroyed -= OnDocumentToBeDestroyed;
 
-                foreach (Document doc in Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager)
+                foreach (Document d in Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager)
                 {
-                    if (doc.Database != null)
+                    if (d.Database != null)
                     {
-                        WallSyncReactor.Instance.Unregister(doc.Database);
+                        WallSyncReactor.Instance.Unregister(d.Database);
                     }
                 }
 
-                // Unregister OVERRULES
-                Overrule.RemoveOverrule(RXClass.GetClass(typeof(Entity)), WallViewGripOverrule.Instance);
+                // [OVERRULE] Unregister saat unload
+                GripOverrule.RemoveOverrule(RXClass.GetClass(typeof(Entity)), WallViewGripOverrule.Instance);
             }
             catch { }
         }

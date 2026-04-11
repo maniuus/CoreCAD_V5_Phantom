@@ -1,4 +1,3 @@
-using Autodesk.AutoCAD.Colors;
 using Autodesk.AutoCAD.DatabaseServices;
 using CoreCAD.Models;
 using Newtonsoft.Json;
@@ -24,10 +23,9 @@ namespace CoreCAD.Core
         {
             try
             {
-                // [ROBUST] Cek beberapa lokasi untuk mencari drawing_standard.json
                 string[] locations = new string[] {
                     Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".",
-                    "d:\\ABIMANYU\\Devlab\\CoreCAD_V2\\CoreCAD", // Dev fallback
+                    "d:\\ABIMANYU\\Devlab\\CoreCAD_V2\\CoreCAD",
                     "."
                 };
 
@@ -56,9 +54,6 @@ namespace CoreCAD.Core
             return "0";
         }
 
-        /// <summary>
-        /// Pastikan layer ada di database. Jika belum, buat dengan warna yang sesuai standard.
-        /// </summary>
         public void EnsureLayer(Database db, Transaction tr, string key)
         {
             if (!Config.Layers.TryGetValue(key, out var cfg)) return;
@@ -78,10 +73,11 @@ namespace CoreCAD.Core
                 ltr = (LayerTableRecord)tr.GetObject(lt[cfg.Name], OpenMode.ForWrite);
             }
 
-            // [STRICT] Paksa warna sesuai standard (Force Color)
             if (ltr != null)
             {
                 ltr.Color = Autodesk.AutoCAD.Colors.Color.FromColorIndex(Autodesk.AutoCAD.Colors.ColorMethod.ByAci, cfg.Color);
+                ltr.IsOff = false;
+                ltr.IsFrozen = false;
             }
         }
     }
