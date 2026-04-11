@@ -16,12 +16,9 @@ namespace CoreCAD.Modules.Architecture
 
         public double Length => StartPoint.DistanceTo(EndPoint);
 
-        public SmartWall()
-        {
-            CoreCAD_ID = Guid.NewGuid();
-        }
+        public SmartWall() { CoreCAD_ID = Guid.NewGuid(); }
 
-        public Point3dCollection GetVertices(bool includeMiter, Line? parent = null)
+        public Point3dCollection GetVertices()
         {
             if (Length < 0.1) return new Point3dCollection();
 
@@ -42,7 +39,7 @@ namespace CoreCAD.Modules.Architecture
         public override void SaveToXData(Entity ent, Transaction tr)
         {
             XDataManager.EnsureRegApp(ent.Database, tr);
-            XDataManager.SetIdentity(ent, CoreCAD_ID, MaterialId, LevelId, PseudoZ, Role);
+            XDataManager.SetIdentity(ent, CoreCAD_ID, MaterialId, LevelId, PseudoZ, Role, Thickness);
         }
 
         public override void LoadFromXData(Entity ent)
@@ -55,6 +52,7 @@ namespace CoreCAD.Modules.Architecture
                 LevelId = identity.Value.levelId;
                 PseudoZ = identity.Value.pseudoZ;
                 Role = identity.Value.role;
+                Thickness = identity.Value.thickness;
             }
         }
     }

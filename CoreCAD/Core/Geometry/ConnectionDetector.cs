@@ -12,37 +12,40 @@ namespace CoreCAD.Core.Geometry
     /// </summary>
     public static class ConnectionDetector
     {
-        public static Line? FindNeighborAtPoint(Line target, Point3d junctionPoint, double tolerance = 50.0)
+        public static List<Line> FindNeighborsAtPoint(Line target, Point3d junctionPoint, Transaction? tr = null, double tolerance = 100.0)
         {
+            List<Line> neighbors = new List<Line>();
             Database db = target.Database;
-            // Protective check: WorldDraw can call this on non-database entities (JIGs)
-            if (db == null) return null;
+            if (db == null) return neighbors;
 
-            using (var tr = db.TransactionManager.StartOpenCloseTransaction())
+            bool isLocalTr = (tr == null);
+            Transaction actualTr = tr ?? db.TransactionManager.StartOpenCloseTransaction();
+
+            try
             {
-                // Fix: Using target.OwnerId instead of db.CurrentSpaceId for stability during reactors
-                BlockTableRecord btr = (BlockTableRecord)tr.GetObject(target.OwnerId, OpenMode.ForRead);
-                if (btr == null) return null;
+                BlockTableRecord btr = (BlockTableRecord)actualTr.GetObject(target.OwnerId, OpenMode.ForRead);
+                if (btr == null) return neighbors;
 
                 foreach (ObjectId id in btr)
                 {
                     if (id == target.ObjectId) continue;
-
-                    // Filter for Line entities
                     if (id.ObjectClass.IsDerivedFrom(RXClass.GetClass(typeof(Line))))
                     {
-                        Line neighbor = (Line)tr.GetObject(id, OpenMode.ForRead);
-                        
-                        // Rule 3: Radius Check (50mm Tolerance)
+                        Line neighbor = (Line)actualTr.GetObject(id, OpenMode.ForRead);
                         if (neighbor.StartPoint.DistanceTo(junctionPoint) < tolerance || 
                             neighbor.EndPoint.DistanceTo(junctionPoint) < tolerance)
                         {
-                            return neighbor; // RETURN FIRST MATCH (Protocol Focus: L-Junction)
+                            neighbors.Add(neighbor);
                         }
                     }
                 }
             }
-            return null;
+            finally
+            {
+                if (isLocalTr) actualTr.Dispose();
+            }
+            
+            return neighbors;
         }
     }
 }

@@ -19,7 +19,7 @@ namespace CoreCAD.Modules.Architecture
         {
             Document doc = Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument;
             if (doc == null) return;
-            
+
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
@@ -62,18 +62,18 @@ namespace CoreCAD.Modules.Architecture
                 line.Layer = LayerService.CenterlineLayer;
                 btr.AppendEntity(line);
                 tr.AddNewlyCreatedDBObject(line, true);
-                
+
                 wall.Role = "MASTER";
                 wall.SaveToXData(line, tr);
 
                 // B. Boundary Polyline
-                Point3dCollection pts = wall.GetVertices(true, line);
+                Point3dCollection pts = wall.GetVertices();
                 if (pts.Count >= 4)
                 {
                     Polyline pl = WallGeometryService.CreateWallBoundary(pts, LayerService.WallLayer);
                     btr.AppendEntity(pl);
                     tr.AddNewlyCreatedDBObject(pl, true);
-                    
+
                     wall.Role = "FOLLOWER";
                     wall.SaveToXData(pl, tr);
 
@@ -81,12 +81,12 @@ namespace CoreCAD.Modules.Architecture
                     Hatch hatch = WallGeometryService.CreateWallHatch(pl, LayerService.WallHatchLayer);
                     btr.AppendEntity(hatch);
                     tr.AddNewlyCreatedDBObject(hatch, true);
-                    
+
                     // Enable associativity AFTER appending to database
                     hatch.Associative = true;
                     hatch.AppendLoop(HatchLoopTypes.Default, new ObjectIdCollection { pl.ObjectId });
                     hatch.EvaluateHatch(true);
-                    
+
                     wall.Role = "FOLLOWER";
                     wall.SaveToXData(hatch, tr);
 

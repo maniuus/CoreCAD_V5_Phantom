@@ -21,8 +21,8 @@ namespace CoreCAD.Core.Geometry
                 Thickness = thickness
             };
 
-            // Delegate calculation to the SmartWall model (which now handles miters)
-            return wall.GetVertices(true, line);
+            // Delegates to SmartWall model for pure rectangular baseline (no miter — miter is applied by BooleanUnionEngine)
+            return wall.GetVertices();
         }
 
         public static Polyline CreateWallBoundary(Point3dCollection pts, string layer)

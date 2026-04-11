@@ -3,7 +3,13 @@ using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Runtime;
 using CoreCAD.Core.Geometry;
 using CoreCAD.Core.Services;
+using CoreCAD.Modules.Architecture;
 using System;
+
+// CRITICAL: Explicit assembly-level hints for AutoCAD command scanner
+// Required for reliable loading in AutoCAD 2025 (.NET 8)
+[assembly: ExtensionApplication(typeof(CoreCAD.Core.Initializer))]
+[assembly: CommandClass(typeof(CoreCAD.Modules.Architecture.Commands))]
 
 namespace CoreCAD.Core
 {

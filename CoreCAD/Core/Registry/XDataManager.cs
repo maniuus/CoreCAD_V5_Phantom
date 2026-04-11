@@ -1,46 +1,44 @@
 using Autodesk.AutoCAD.DatabaseServices;
 using Autodesk.AutoCAD.Geometry;
 using Autodesk.AutoCAD.Runtime;
+using CoreCAD.Core.Diagnostics;
 using System;
 
 namespace CoreCAD.Core.Registry
 {
     /// <summary>
     /// Manages the CORECAD_ENGINE XData registry and identity injection.
+    /// Hardened for V5 Junction Protocol with Transaction-safe 'Silent Guards'.
     /// </summary>
     public static class XDataManager
     {
         public const string RegAppName = "CORECAD_ENGINE";
+        public const string GroupRegAppName = "CORECAD_GROUP";
 
-        /// <summary>
-        /// Registers the CoreCAD AppID in the drawing if not already present.
-        /// </summary>
         public static void EnsureRegApp(Database db, Transaction tr)
         {
             if (db == null) return;
             RegAppTable rat = (RegAppTable)tr.GetObject(db.RegAppTableId, OpenMode.ForRead);
             if (!rat.Has(RegAppName))
             {
-                rat.UpgradeOpen();
+                SafeUpgradeOpen(rat);
                 RegAppTableRecord ratr = new RegAppTableRecord { Name = RegAppName };
+                rat.Add(ratr);
+                tr.AddNewlyCreatedDBObject(ratr, true);
+            }
+            if (!rat.Has(GroupRegAppName))
+            {
+                SafeUpgradeOpen(rat);
+                RegAppTableRecord ratr = new RegAppTableRecord { Name = GroupRegAppName };
                 rat.Add(ratr);
                 tr.AddNewlyCreatedDBObject(ratr, true);
             }
         }
 
-        /// <summary>
-        /// Injects standard identity XData into an entity.
-        /// Standard Format: [1001] AppName, [1000] GUID, [1000] MaterialID, [1000] LevelID, [1040] PseudoZ, [1000] Role.
-        /// </summary>
-        public static void SetIdentity(Entity ent, Guid guid, string materialId, string levelId, double pseudoZ, string role = "FOLLOWER")
+        public static void SetIdentity(Entity ent, Guid guid, string materialId, string levelId, double pseudoZ, string role = "FOLLOWER", double thickness = 150.0)
         {
-            // Proteksi: Pastikan entitas OpenForWrite
-            if (!ent.IsWriteEnabled)
-            {
-                ent.UpgradeOpen();
-            }
+            SafeUpgradeOpen(ent);
 
-            // Standarisasi GUID format "D" Uppercase
             string guidString = guid.ToString("D").ToUpper();
 
             using (ResultBuffer rb = new ResultBuffer(
@@ -49,25 +47,22 @@ namespace CoreCAD.Core.Registry
                 new TypedValue((int)DxfCode.ExtendedDataAsciiString, materialId),
                 new TypedValue((int)DxfCode.ExtendedDataAsciiString, levelId),
                 new TypedValue((int)DxfCode.ExtendedDataReal, pseudoZ),
-                new TypedValue((int)DxfCode.ExtendedDataAsciiString, role)
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, role),
+                new TypedValue((int)DxfCode.ExtendedDataReal, thickness)
             ))
             {
                 ent.XData = rb;
             }
         }
 
-        /// <summary>
-        /// Extracts CoreCAD Identity from an entity's XData.
-        /// </summary>
-        /// <returns>A tuple containing (Guid, MaterialId, LevelId, PseudoZ, Role). Returns null if no XData found.</returns>
-        public static (Guid guid, string materialId, string levelId, double pseudoZ, string role)? GetIdentity(Entity ent)
+        public static (Guid guid, string materialId, string levelId, double pseudoZ, string role, double thickness)? GetIdentity(Entity ent)
         {
             using (ResultBuffer rb = ent.GetXDataForApplication(RegAppName))
             {
                 if (rb == null) return null;
 
                 TypedValue[] tvs = rb.AsArray();
-                if (tvs.Length < 5) return null; // AppName + 4 pockets
+                if (tvs.Length < 5) return null;
 
                 try
                 {
@@ -76,8 +71,9 @@ namespace CoreCAD.Core.Registry
                     string lvlId = tvs[3].Value.ToString() ?? string.Empty;
                     double pZ = Convert.ToDouble(tvs[4].Value);
                     string role = tvs.Length > 5 ? (tvs[5].Value.ToString() ?? "FOLLOWER") : "FOLLOWER";
+                    double thickness = tvs.Length > 6 ? Convert.ToDouble(tvs[6].Value) : 150.0;
 
-                    return (guid, matId, lvlId, pZ, role);
+                    return (guid, matId, lvlId, pZ, role, thickness);
                 }
                 catch
                 {
@@ -86,236 +82,151 @@ namespace CoreCAD.Core.Registry
             }
         }
 
-        /// <summary>
-        /// Copies CoreCAD identity from one entity to another.
-        /// </summary>
+        public static bool HasIdentity(Entity ent)
+        {
+            using (ResultBuffer rb = ent.GetXDataForApplication(RegAppName)) { return rb != null; }
+        }
+
         public static void CopyIdentity(Entity source, Entity target, Transaction tr)
         {
             var identity = GetIdentity(source);
             if (identity != null)
             {
                 EnsureRegApp(target.Database, tr);
-                SetIdentity(target, identity.Value.guid, identity.Value.materialId, identity.Value.levelId, identity.Value.pseudoZ, identity.Value.role);
+                SetIdentity(target, identity.Value.guid, identity.Value.materialId,
+                            identity.Value.levelId, identity.Value.pseudoZ,
+                            identity.Value.role, identity.Value.thickness);
             }
         }
 
-        /// <summary>
-        /// Stores calculated joint vertices in an XRecord (Level 2 Cache).
-        /// Standard Cache: 4 points (Start-Left, End-Left, End-Right, Start-Right) => 12 Double values.
-        /// </summary>
-        public static void SetJointCache(Entity ent, Point3dCollection points, Transaction tr)
+        public static ObjectIdCollection FindEntitiesByGuid(Database db, Guid guid, Transaction tr)
         {
-            if (points.Count < 4) return;
-
-            // 1. Get/Create Extension Dictionary
-            if (ent.ExtensionDictionary == ObjectId.Null)
+            ObjectIdCollection ids = new ObjectIdCollection();
+            BlockTableRecord btr = (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForRead);
+            foreach (ObjectId entId in btr)
             {
-                ent.UpgradeOpen();
-                ent.CreateExtensionDictionary();
+                if (entId.IsErased) continue;
+                Entity ent = (Entity)tr.GetObject(entId, OpenMode.ForRead);
+                var identity = GetIdentity(ent);
+                if (identity != null && identity.Value.guid == guid) ids.Add(entId);
             }
-
-            DBDictionary dict = (DBDictionary)tr.GetObject(ent.ExtensionDictionary, OpenMode.ForWrite);
-            const string entryName = "CORECAD_JOINT_CACHE";
-
-            // 2. Prepare Data Buffer
-            ResultBuffer rb = new ResultBuffer();
-            foreach (Point3d pt in points)
-            {
-                rb.Add(new TypedValue((int)DxfCode.Real, pt.X));
-                rb.Add(new TypedValue((int)DxfCode.Real, pt.Y));
-                rb.Add(new TypedValue((int)DxfCode.Real, pt.Z));
-            }
-
-            // 3. Save to XRecord
-            Xrecord xrec;
-            if (dict.Contains(entryName))
-            {
-                xrec = (Xrecord)tr.GetObject(dict.GetAt(entryName), OpenMode.ForWrite);
-            }
-            else
-            {
-                xrec = new Xrecord();
-                dict.SetAt(entryName, xrec);
-                tr.AddNewlyCreatedDBObject(xrec, true);
-            }
-
-            xrec.Data = rb;
+            return ids;
         }
 
-        /// <summary>
-        /// Retrieves cached joint vertices for high-performance rendering.
-        /// </summary>
-        public static Point3dCollection? GetJointCache(Entity ent)
+        public static void LinkChildren(Entity parent, System.Collections.Generic.IEnumerable<ObjectId> children, Transaction tr)
         {
-            if (ent.ExtensionDictionary == ObjectId.Null) return null;
-
-            // Note: Using OpenCloseTransaction for read-only access in WorldDraw context
-            Database db = ent.Database;
-            using (var tr = db.TransactionManager.StartOpenCloseTransaction())
-            {
-                DBDictionary dict = (DBDictionary)tr.GetObject(ent.ExtensionDictionary, OpenMode.ForRead);
-                const string entryName = "CORECAD_JOINT_CACHE";
-
-                if (!dict.Contains(entryName)) return null;
-
-                Xrecord xrec = (Xrecord)tr.GetObject(dict.GetAt(entryName), OpenMode.ForRead);
-                using (ResultBuffer? rb = xrec.Data)
-                {
-                    if (rb == null) return null;
-                    TypedValue[] tvs = rb.AsArray();
-                    if (tvs.Length < 12) return null;
-
-                    Point3dCollection pts = new Point3dCollection();
-                    for (int i = 0; i < 12; i += 3)
-                    {
-                        pts.Add(new Point3d(
-                            Convert.ToDouble(tvs[i].Value),
-                            Convert.ToDouble(tvs[i + 1].Value),
-                            Convert.ToDouble(tvs[i + 2].Value)
-                        ));
-                    }
-                    return pts;
-                }
+            if (parent.ExtensionDictionary == ObjectId.Null) 
+            { 
+                SafeUpgradeOpen(parent); 
+                parent.CreateExtensionDictionary(); 
             }
-        }
-        private const string ChildrenDictName = "CORECAD_CHILDREN";
-
-        /// <summary>
-        /// Links child objects to a parent entity using Handles in an XRecord.
-        /// </summary>
-        public static void LinkChildren(Entity parent, IEnumerable<ObjectId> children, Transaction tr)
-        {
-            if (parent.ExtensionDictionary == ObjectId.Null)
-            {
-                parent.UpgradeOpen();
-                parent.CreateExtensionDictionary();
-            }
-
             DBDictionary dict = (DBDictionary)tr.GetObject(parent.ExtensionDictionary, OpenMode.ForWrite);
             Xrecord xrec;
-
-            if (dict.Contains(ChildrenDictName))
-            {
-                xrec = (Xrecord)tr.GetObject(dict.GetAt(ChildrenDictName), OpenMode.ForWrite);
-            }
-            else
-            {
-                xrec = new Xrecord();
-                dict.SetAt(ChildrenDictName, xrec);
-                tr.AddNewlyCreatedDBObject(xrec, true);
-            }
-
+            if (dict.Contains("CORECAD_CHILDREN")) xrec = (Xrecord)tr.GetObject(dict.GetAt("CORECAD_CHILDREN"), OpenMode.ForWrite);
+            else { xrec = new Xrecord(); dict.SetAt("CORECAD_CHILDREN", xrec); tr.AddNewlyCreatedDBObject(xrec, true); }
+            
             ResultBuffer rb = new ResultBuffer();
-            foreach (ObjectId id in children)
-            {
-                if (!id.IsNull)
-                {
-                    rb.Add(new TypedValue((int)DxfCode.Handle, id.Handle));
-                }
-            }
+            foreach (ObjectId id in children) if (!id.IsNull) rb.Add(new TypedValue((int)DxfCode.Handle, id.Handle));
             xrec.Data = rb;
         }
 
-        /// <summary>
-        /// Retrieves ObjectIds of linked children.
-        /// </summary>
         public static ObjectIdCollection GetChildren(Entity parent, Transaction tr)
         {
             ObjectIdCollection ids = new ObjectIdCollection();
             if (parent.ExtensionDictionary == ObjectId.Null) return ids;
-
             DBDictionary dict = (DBDictionary)tr.GetObject(parent.ExtensionDictionary, OpenMode.ForRead);
-            if (!dict.Contains(ChildrenDictName)) return ids;
-
-            Xrecord xrec = (Xrecord)tr.GetObject(dict.GetAt(ChildrenDictName), OpenMode.ForRead);
+            if (!dict.Contains("CORECAD_CHILDREN")) return ids;
+            Xrecord xrec = (Xrecord)tr.GetObject(dict.GetAt("CORECAD_CHILDREN"), OpenMode.ForRead);
             using (ResultBuffer? rb = xrec.Data)
             {
                 if (rb == null) return ids;
-                foreach (TypedValue tv in rb)
+                foreach (TypedValue tv in rb) if (tv.TypeCode == (int)DxfCode.Handle && tv.Value != null)
                 {
-                    if (tv.TypeCode == (int)DxfCode.Handle && tv.Value != null)
-                    {
-                        string? hStr = tv.Value.ToString();
-                        if (!string.IsNullOrEmpty(hStr))
-                        {
-                            Handle h = new Handle(Convert.ToInt64(hStr, 16));
-                            if (parent.Database.TryGetObjectId(h, out ObjectId id))
-                            {
-                                ids.Add(id);
-                            }
-                        }
-                    }
+                    Handle h = new Handle(Convert.ToInt64(tv.Value.ToString(), 16));
+                    if (parent.Database.TryGetObjectId(h, out ObjectId id)) ids.Add(id);
                 }
             }
             return ids;
         }
 
-        /// <summary>
-        /// Removes all children links and optionally erases child objects.
-        /// </summary>
-        public static void UnlinkChildren(Entity parent, Transaction tr, bool eraseChildren = false)
+        public static void SetGroupId(Entity ent, string groupId)
         {
-            if (parent.ExtensionDictionary == ObjectId.Null) return;
-
-            DBDictionary dict = (DBDictionary)tr.GetObject(parent.ExtensionDictionary, OpenMode.ForRead);
-            if (!dict.Contains(ChildrenDictName)) return;
-
-            if (eraseChildren)
+            SafeUpgradeOpen(ent);
+            using (ResultBuffer rb = new ResultBuffer(
+                new TypedValue((int)DxfCode.ExtendedDataRegAppName, GroupRegAppName),
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, groupId)
+            ))
             {
-                ObjectIdCollection children = GetChildren(parent, tr);
-                foreach (ObjectId id in children)
-                {
-                    if (!id.IsErased && id.IsValid)
-                    {
-                        Entity ent = (Entity)tr.GetObject(id, OpenMode.ForWrite);
-                        ent.Erase();
-                    }
-                }
+                ent.XData = rb;
             }
-
-            dict.UpgradeOpen();
-            dict.Remove(ChildrenDictName);
         }
 
-        /// <summary>
-        /// Lightweight check to see if an entity has CoreCAD identity XData.
-        /// </summary>
-        public static bool HasIdentity(Entity ent)
+        public static string GetGroupId(Entity ent)
+        {
+            using (ResultBuffer rb = ent.GetXDataForApplication(GroupRegAppName))
+            {
+                if (rb == null) return string.Empty;
+                TypedValue[] tvs = rb.AsArray();
+                return tvs.Length > 1 ? (tvs[1].Value.ToString() ?? string.Empty) : string.Empty;
+            }
+        }
+
+        public static void SetParentGuids(Entity ent, string[] guids)
+        {
+            SafeUpgradeOpen(ent);
+            string joined = string.Join(";", guids);
+            using (ResultBuffer rb = new ResultBuffer(
+                new TypedValue((int)DxfCode.ExtendedDataRegAppName, RegAppName),
+                new TypedValue((int)DxfCode.ExtendedDataAsciiString, "PARENTS:" + joined)
+            ))
+            {
+                ent.XData = rb;
+            }
+        }
+
+        public static string[] GetParentGuids(Entity ent)
         {
             using (ResultBuffer rb = ent.GetXDataForApplication(RegAppName))
             {
-                return rb != null;
-            }
-        }
-
-        /// <summary>
-        /// Scans the database for all entities sharing a specific CoreCAD GUID.
-        /// Useful for re-binding children after copy operations or finding orphans.
-        /// </summary>
-        public static ObjectIdCollection FindEntitiesByGuid(Database db, Guid guid, Transaction tr)
-        {
-            ObjectIdCollection ids = new ObjectIdCollection();
-            string searchGuid = guid.ToString("D").ToUpper();
-
-            BlockTable bt = (BlockTable)tr.GetObject(db.BlockTableId, OpenMode.ForRead);
-            foreach (ObjectId btrId in bt)
-            {
-                BlockTableRecord btr = (BlockTableRecord)tr.GetObject(btrId, OpenMode.ForRead);
-                if (!btr.IsLayout) continue; // Only scan ModelSpace and PaperSpace layouts
-
-                foreach (ObjectId entId in btr)
+                if (rb == null) return Array.Empty<string>();
+                TypedValue[] tvs = rb.AsArray();
+                foreach (var tv in tvs)
                 {
-                    if (entId.IsErased) continue;
-                    
-                    Entity ent = (Entity)tr.GetObject(entId, OpenMode.ForRead);
-                    var identity = GetIdentity(ent);
-                    if (identity != null && identity.Value.guid == guid)
+                    string val = tv.Value.ToString() ?? "";
+                    if (val.StartsWith("PARENTS:"))
                     {
-                        ids.Add(entId);
+                        return val.Substring(8).Split(';', StringSplitOptions.RemoveEmptyEntries);
                     }
                 }
             }
-            return ids;
+            return Array.Empty<string>();
+        }
+
+        /// <summary>
+        /// THE SILENT GUARD: Safely upgrades an object to WRITE state or fails silently if already locked.
+        /// Prevents eInvalidOpenState crashes in high-speed reactor cycles.
+        /// </summary>
+        public static void SafeUpgradeOpen(DBObject obj)
+        {
+            if (obj == null || obj.IsErased || obj.IsWriteEnabled) return;
+
+            try
+            {
+                obj.UpgradeOpen();
+            }
+            catch (Autodesk.AutoCAD.Runtime.Exception ex)
+            {
+                // Capture eInvalidOpenState silently as it usually means a parent transaction is already active
+                if (ex.ErrorStatus == ErrorStatus.InvalidOpenState)
+                {
+                    DebugLogger.Log($"[SILENT GUARD] Suppressed eInvalidOpenState for {obj.Handle}");
+                }
+                else
+                {
+                    // For other critical errors, we still want to know
+                    DebugLogger.Error("Critical UpgradeOpen Failure", ex);
+                }
+            }
         }
     }
 }

@@ -49,7 +49,7 @@ namespace CoreCAD.Modules.Architecture
             if (_wall.Length < 0.1) return true;
 
             // Use the SmartWall model to generate preview geometry
-            Point3dCollection pts = _wall.GetVertices(false);
+            Point3dCollection pts = _wall.GetVertices();
 
             if (pts.Count >= 4)
             {
