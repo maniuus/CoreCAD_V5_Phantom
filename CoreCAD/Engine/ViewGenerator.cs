@@ -93,7 +93,15 @@ namespace CoreCAD.Engine
             foreach (WallModel model in walls)
             {
                 // D — Polyline dari vertex hasil kalkulasi
-                Polyline wallPoly = BuildPolylineFromModel(model);
+                Polyline? wallPoly = BuildPolylineFromModel(model);
+                if (wallPoly == null)
+                {
+                    // Log error ke AutoCAD console
+                    Autodesk.AutoCAD.ApplicationServices.Application.DocumentManager.MdiActiveDocument.Editor.WriteMessage(
+                        $"\n[CoreCAD Warning] Dinding {model.LineId} dilewati karena geometri melilit (Self-Intersecting).");
+                    continue;
+                }
+
                 btr.AppendEntity(wallPoly);
                 tr.AddNewlyCreatedDBObject(wallPoly, true);
                 TagAsView(wallPoly);
@@ -176,18 +184,35 @@ namespace CoreCAD.Engine
                     WallModel a = walls[i];
                     WallModel b = walls[j];
 
+                    // --- PRIORITY CHECK: Ketebalan Berbeda ---
+                    // Jika tebal berbeda, gunakan Butt Join (thinner yields to thicker).
+                    // Jika tebal sama (toleransi 1mm), gunakan Miter Join.
+                    bool useButt = Math.Abs(a.Thickness - b.Thickness) > 1.0;
+
                     // 4 kombinasi endpoint: A.Start-B.Start, A.Start-B.End, dll.
                     if (WallMath.IsSharedNode(a.Start, b.Start))
-                        ApplyMiter(a, isStartOfA: true,  b, isStartOfB: true);
+                    {
+                        if (useButt) ApplyButtJoin(a, isStartOfA: true, b);
+                        else ApplyMiter(a, isStartOfA: true, b, isStartOfB: true);
+                    }
 
                     if (WallMath.IsSharedNode(a.Start, b.End))
-                        ApplyMiter(a, isStartOfA: true,  b, isStartOfB: false);
+                    {
+                        if (useButt) ApplyButtJoin(a, isStartOfA: true, b);
+                        else ApplyMiter(a, isStartOfA: true, b, isStartOfB: false);
+                    }
 
                     if (WallMath.IsSharedNode(a.End, b.Start))
-                        ApplyMiter(a, isStartOfA: false, b, isStartOfB: true);
+                    {
+                        if (useButt) ApplyButtJoin(a, isStartOfA: false, b);
+                        else ApplyMiter(a, isStartOfA: false, b, isStartOfB: true);
+                    }
 
                     if (WallMath.IsSharedNode(a.End, b.End))
-                        ApplyMiter(a, isStartOfA: false, b, isStartOfB: false);
+                    {
+                        if (useButt) ApplyButtJoin(a, isStartOfA: false, b);
+                        else ApplyMiter(a, isStartOfA: false, b, isStartOfB: false);
+                    }
                 }
             }
         }
@@ -203,56 +228,112 @@ namespace CoreCAD.Engine
         /// </summary>
         private static void ApplyMiter(WallModel a, bool isStartOfA, WallModel b, bool isStartOfB)
         {
-            // Arah A menjauh dari junction
-            Vector2d dirA = isStartOfA
-                ? a.Direction
-                : new Vector2d(-a.Direction.X, -a.Direction.Y);
+            Vector2d dirA = isStartOfA ? a.Direction : -a.Direction;
+            Vector2d dirB = isStartOfB ? b.Direction : -b.Direction;
 
-            // Arah B menjauh dari junction
-            Vector2d dirB = isStartOfB
-                ? b.Direction
-                : new Vector2d(-b.Direction.X, -b.Direction.Y);
+            // [ANTI-BUTTERFLY] Hitung Cross Product untuk tahu arah belokan
+            // Positive = Belok Kiri, Negative = Belok Kanan
+            double cross = (dirA.X * dirB.Y) - (dirA.Y * dirB.X);
+            
+            // Jika sangat mendekati nol, dinding sejajar (Straight) — tidak perlu miter miring
+            if (System.Math.Abs(cross) < 1e-4) return;
 
-            // Perpendikular kiri masing-masing (rotating 90° counter-clockwise dari arah jalan)
-            Vector2d perpA = new Vector2d(-dirA.Y,  dirA.X);
-            Vector2d perpB = new Vector2d(-dirB.Y,  dirB.X);
+            Vector2d perpA = new Vector2d(-dirA.Y, dirA.X); // Left Perp
+            Vector2d perpB = new Vector2d(-dirB.Y, dirB.X); // Left Perp
 
-            // Titik junction (shared node)
             Point2d J = isStartOfA ? a.Start : a.End;
+            Point2d J_other = isStartOfA ? a.End : a.Start;
 
             double halfA = a.Thickness / 2.0;
             double halfB = b.Thickness / 2.0;
 
-            // ── LEFT MITER ──────────────────────────────────────────────────
-            // Titik asal left edge di junction untuk masing-masing dinding
+            // --- CALCULATE MITER INTERSECTIONS ---
+            // Left A ∩ Left B
             Point2d leftA = new Point2d(J.X + perpA.X * halfA, J.Y + perpA.Y * halfA);
             Point2d leftB = new Point2d(J.X + perpB.X * halfB, J.Y + perpB.Y * halfB);
-
-            // Perpotongan dua garis tepi kiri (infinite line)
             Point2d? leftMiter = WallMath.GetLineIntersection(leftA, dirA, leftB, dirB);
 
-            // ── RIGHT MITER ─────────────────────────────────────────────────
+            // Right A ∩ Right B
             Point2d rightA = new Point2d(J.X - perpA.X * halfA, J.Y - perpA.Y * halfA);
             Point2d rightB = new Point2d(J.X - perpB.X * halfB, J.Y - perpB.Y * halfB);
-
             Point2d? rightMiter = WallMath.GetLineIntersection(rightA, dirA, rightB, dirB);
 
-            // ── UPDATE VERTEX WALL A ─────────────────────────────────────────
+            // --- MAPPING & VALIDATION ---
+            // Kita harus tetap memetakan Left Miter ke Left Vertex (V0/V1) 
+            // dan Right Miter ke Right Vertex (V3/V2) untuk menjaga topologi poligon.
             if (isStartOfA)
             {
-                if (leftMiter.HasValue)  a.V0 = leftMiter.Value;   // Start-Left
-                if (rightMiter.HasValue) a.V3 = rightMiter.Value;  // Start-Right
+                if (leftMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, leftMiter.Value)) 
+                    a.V0 = leftMiter.Value;
+                if (rightMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, rightMiter.Value))
+                    a.V3 = rightMiter.Value;
             }
             else
             {
-                if (leftMiter.HasValue)  a.V1 = leftMiter.Value;   // End-Left
-                if (rightMiter.HasValue) a.V2 = rightMiter.Value;  // End-Right
+                if (leftMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, leftMiter.Value))
+                    a.V1 = leftMiter.Value;
+                if (rightMiter.HasValue && WallMath.ValidateMiterPoint(J, J_other, rightMiter.Value))
+                    a.V2 = rightMiter.Value;
+            }
+        }
+
+        /// <summary>
+        /// [PRIORITY] Dinding Thinner mengalah ke Dinding Thicker.
+        /// Vertex wall A dibuat menempel rata ke 'muka' wall B.
+        /// </summary>
+        private static void ApplyButtJoin(WallModel a, bool isStartOfA, WallModel b)
+        {
+            // Jika A lebih tebal dari B, A tidak boleh mengalah.
+            if (a.Thickness > b.Thickness) return;
+
+            Vector2d dirA = isStartOfA ? a.Direction : -a.Direction;
+            Vector2d perpA = new Vector2d(-dirA.Y, dirA.X);
+            
+            Vector2d dirB = b.Direction;
+            Vector2d perpB = new Vector2d(-dirB.Y, dirB.X);
+
+            Point2d J = isStartOfA ? a.Start : a.End;
+            double halfA = a.Thickness / 2.0;
+            double halfB = b.Thickness / 2.0;
+
+            // Cari muka wall B yang paling dekat dengan arah wall A
+            // Proyeksikan arah A ke perpB untuk tahu sisi mana yang ditabrak
+            double sideCheck = dirA.X * perpB.X + dirA.Y * perpB.Y;
+            double offsetB = (sideCheck > 0) ? -halfB : halfB; // Masuk ke arah b.perp atau sebaliknya
+
+            // Garis Muka B: P = b.Start + perpB * offsetB, Direction = b.Direction
+            Point2d faceBPoint = new Point2d(b.Start.X + perpB.X * offsetB, b.Start.Y + perpB.Y * offsetB);
+            
+            // Intersect tepi kiri A dengan muka B
+            Point2d edgeLeftA = new Point2d(J.X + perpA.X * halfA, J.Y + perpA.Y * halfA);
+            Point2d? pLeft = WallMath.GetLineIntersection(edgeLeftA, dirA, faceBPoint, dirB);
+
+            // Intersect tepi kanan A dengan muka B
+            Point2d edgeRightA = new Point2d(J.X - perpA.X * halfA, J.Y - perpA.Y * halfA);
+            Point2d? pRight = WallMath.GetLineIntersection(edgeRightA, dirA, faceBPoint, dirB);
+
+            if (isStartOfA)
+            {
+                if (pLeft.HasValue) a.V0 = pLeft.Value;
+                if (pRight.HasValue) a.V3 = pRight.Value;
+            }
+            else
+            {
+                if (pLeft.HasValue) a.V1 = pLeft.Value;
+                if (pRight.HasValue) a.V2 = pRight.Value;
             }
         }
 
         // ── Step D ────────────────────────────────────────────────────────────
-        private static Polyline BuildPolylineFromModel(WallModel model)
+        private static Polyline? BuildPolylineFromModel(WallModel model)
         {
+            // [ANTI-KELIPET] Cek apakah poligon melilit sebelum diproses
+            if (!WallMath.IsSimplePolygon(model.V0, model.V1, model.V2, model.V3))
+            {
+                // Jika melilit, jangan gambar (atau log error)
+                return null;
+            }
+
             Polyline poly = new Polyline();
             poly.SetDatabaseDefaults();
             poly.AddVertexAt(0, model.V0, 0, 0, 0);
